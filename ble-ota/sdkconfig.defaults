@@ -10,6 +10,11 @@ CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4000
 # Negotiate a large ATT MTU so OTA data chunks aren't limited to ~20 bytes
 CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=517
 
+# Educational pairing/bonding example (see main.c's ble_hs_cfg.sm_* setup and
+# led_service.c's encrypted characteristic): without this, a bond only lasts
+# until disconnect - the device would ask to pair again on every reconnect.
+CONFIG_BT_NIMBLE_NVS_PERSIST=y
+
 # Educational fast-update path: lets ota_service open an L2CAP CoC channel
 # (see the big comment in ota_service.c) as an alternative to the GATT Data
 # characteristic for bulk firmware bytes.

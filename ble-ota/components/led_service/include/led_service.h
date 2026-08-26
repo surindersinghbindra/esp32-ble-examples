@@ -1,6 +1,9 @@
 #ifndef H_LED_SERVICE_
 #define H_LED_SERVICE_
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -16,6 +19,11 @@ extern "C" {
  * replaces.
  */
 int led_service_init(void);
+
+/* Hooks called from main.c's GAP event handler. */
+void led_service_on_connect(uint16_t conn_handle);
+void led_service_on_disconnect(void);
+void led_service_on_subscribe(uint16_t attr_handle, bool cur_indicate);
 
 #ifdef __cplusplus
 }

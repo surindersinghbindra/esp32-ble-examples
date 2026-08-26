@@ -17,6 +17,11 @@
  * Also handles the boot-time OTA rollback confirmation - see self_check_ok()
  * below - which is about *this running app* proving itself healthy, not
  * about any particular GATT service, so it stays here.
+ *
+ * This file also owns everything connection-level that isn't specific to one
+ * service: the Security Manager (pairing/bonding) configuration, and an
+ * example connection-parameter update request. See the comments at each of
+ * those in app_main() / ble_ota_gap_event() below.
  */
 
 #include <assert.h>
@@ -46,6 +51,15 @@ static const char *device_name = "esp32-ble-ota";
 static uint8_t own_addr_type;
 
 static int ble_ota_gap_event(struct ble_gap_event *event, void *arg);
+
+/*
+ * Defined in NimBLE's store/config component (compiled in as part of the
+ * ESP-IDF `bt` component) but not declared in a public header - every
+ * NimBLE example that wants persisted bonds forward-declares and calls it
+ * the same way. Wires the Security Manager's bond/key storage to NVS, so a
+ * bond survives a reboot instead of only lasting until the next disconnect.
+ */
+void ble_store_config_init(void);
 
 /*
  * A minimal health check run once, right after booting a freshly-flashed
@@ -110,6 +124,31 @@ ble_ota_advertise(void)
     }
 }
 
+/*
+ * Requests different connection parameters than whatever the central
+ * proposed at connect time - a wider interval and a bit of slave latency,
+ * trading a little responsiveness for lower power draw, which is the usual
+ * reason a peripheral asks for this at all. The result (accepted, or
+ * renegotiated by the central) comes back as BLE_GAP_EVENT_CONN_UPDATE
+ * below, not from this call directly - ble_gap_update_params() only starts
+ * the L2CAP Connection Parameter Update procedure.
+ */
+static void ble_ota_update_conn_params(uint16_t conn_handle)
+{
+    struct ble_gap_upd_params params = {
+        .itvl_min = BLE_GAP_CONN_ITVL_MS(30),
+        .itvl_max = BLE_GAP_CONN_ITVL_MS(50),
+        .latency = 0,
+        .supervision_timeout = BLE_GAP_SUPERVISION_TIMEOUT_MS(4000),
+        .min_ce_len = 0,
+        .max_ce_len = 0,
+    };
+    int rc = ble_gap_update_params(conn_handle, &params);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "ble_gap_update_params failed: rc=%d", rc);
+    }
+}
+
 static int
 ble_ota_gap_event(struct ble_gap_event *event, void *arg)
 {
@@ -120,7 +159,9 @@ ble_ota_gap_event(struct ble_gap_event *event, void *arg)
                  event->connect.status);
         if (event->connect.status == 0) {
             ota_service_on_connect(event->connect.conn_handle);
+            led_service_on_connect(event->connect.conn_handle);
             heart_rate_service_on_connect(event->connect.conn_handle);
+            ble_ota_update_conn_params(event->connect.conn_handle);
         } else {
             ble_ota_advertise();
         }
@@ -129,6 +170,7 @@ ble_ota_gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, "disconnect; reason=%d", event->disconnect.reason);
         ota_service_on_disconnect();
+        led_service_on_disconnect();
         heart_rate_service_on_disconnect();
         ble_ota_advertise();
         return 0;
@@ -137,17 +179,59 @@ ble_ota_gap_event(struct ble_gap_event *event, void *arg)
         ble_ota_advertise();
         return 0;
 
+    case BLE_GAP_EVENT_CONN_UPDATE:
+        /* Either side (us above, or the central on its own) asked for new
+         * connection parameters; this is the outcome. */
+        ESP_LOGI(TAG, "connection parameters updated; conn_handle=%d status=%d",
+                 event->conn_update.conn_handle, event->conn_update.status);
+        return 0;
+
     case BLE_GAP_EVENT_SUBSCRIBE:
-        ESP_LOGI(TAG, "subscribe event; attr_handle=%d cur_notify=%d",
-                 event->subscribe.attr_handle, event->subscribe.cur_notify);
+        ESP_LOGI(TAG, "subscribe event; attr_handle=%d cur_notify=%d cur_indicate=%d",
+                 event->subscribe.attr_handle, event->subscribe.cur_notify,
+                 event->subscribe.cur_indicate);
         ota_service_on_subscribe(event->subscribe.attr_handle, event->subscribe.cur_notify);
+        led_service_on_subscribe(event->subscribe.attr_handle, event->subscribe.cur_indicate);
         heart_rate_service_on_subscribe(event->subscribe.attr_handle, event->subscribe.cur_notify);
+        return 0;
+
+    case BLE_GAP_EVENT_NOTIFY_TX:
+        /* Fires for both Notifications and Indications; for an Indication,
+         * status transitions from "sent" (0) to either BLE_HS_EDONE (peer's
+         * stack acknowledged it) or BLE_HS_ETIMEOUT (never acknowledged) -
+         * the confirmation step a plain Notification never gets. */
+        ESP_LOGD(TAG, "notify/indicate tx; conn_handle=%d attr_handle=%d indication=%d status=%d",
+                 event->notify_tx.conn_handle, event->notify_tx.attr_handle,
+                 event->notify_tx.indication, event->notify_tx.status);
         return 0;
 
     case BLE_GAP_EVENT_MTU:
         ESP_LOGI(TAG, "mtu update event; conn_handle=%d mtu=%d",
                  event->mtu.conn_handle, event->mtu.value);
         return 0;
+
+    case BLE_GAP_EVENT_ENC_CHANGE:
+        /* Fires once the Security Manager finishes (successfully or not)
+         * trying to encrypt the link - the moment pairing actually "took". */
+        ESP_LOGI(TAG, "encryption change event; conn_handle=%d status=%d",
+                 event->enc_change.conn_handle, event->enc_change.status);
+        return 0;
+
+    case BLE_GAP_EVENT_REPEAT_PAIRING: {
+        /* The peer already has a bond with us but is trying to pair again -
+         * typically because it lost its half of the bond (e.g. the phone's
+         * Bluetooth settings had "Forget device" used on it) while our side
+         * still has the old one. Delete our stale copy and let the pairing
+         * attempt proceed as a fresh one, rather than rejecting it and
+         * leaving the two sides permanently unable to reconnect securely.
+         */
+        struct ble_gap_conn_desc desc;
+        int rc = ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc);
+        assert(rc == 0);
+        ble_store_util_delete_peer(&desc.peer_id_addr);
+        ESP_LOGI(TAG, "repeat pairing; deleted stale bond, retrying");
+        return BLE_GAP_REPEAT_PAIRING_RETRY;
+    }
 
     default:
         return 0;
@@ -254,6 +338,33 @@ void app_main(void)
     ble_hs_cfg.sync_cb = ble_ota_on_sync;
     ble_hs_cfg.reset_cb = ble_ota_on_reset;
     ble_hs_cfg.gatts_register_cb = gatt_register_cb;
+    ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
+
+    /*
+     * --- Security: pairing + bonding (Just Works, LE Secure Connections) ---
+     *
+     * This board has no display or keyboard, so BLE_SM_IO_CAP_NO_IO (Just
+     * Works) is the only pairing method that makes sense here - it gets
+     * encryption on the link but, unlike Passkey Entry or Numeric
+     * Comparison, no protection against a man-in-the-middle (sm_mitm stays
+     * 0). sm_sc=1 opts into LE Secure Connections (the post-4.2 ECDH-based
+     * pairing) rather than falling back to legacy pairing.
+     *
+     * Enabling this here doesn't force every connection to pair - nothing
+     * on this device ever calls ble_gap_security_initiate() itself. Pairing
+     * actually happens the first time a central touches an
+     * encryption-requiring attribute (see led_service.c's Config
+     * characteristic) and its stack reacts to the resulting ATT error by
+     * starting the Security Manager procedure - the OTA and Heart Rate
+     * characteristics are deliberately left as they were (no security
+     * requirement), so this doesn't change their existing, tested behavior.
+     */
+    ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_NO_IO;
+    ble_hs_cfg.sm_bonding = 1;
+    ble_hs_cfg.sm_mitm = 0;
+    ble_hs_cfg.sm_sc = 1;
+    ble_hs_cfg.sm_our_key_dist |= BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_their_key_dist |= BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
 
 #if CONFIG_BT_NIMBLE_GAP_SERVICE
     ble_svc_gap_init();
@@ -269,6 +380,8 @@ void app_main(void)
 
     rc = ble_svc_gap_device_name_set(device_name);
     assert(rc == 0);
+
+    ble_store_config_init();
 
     nimble_port_freertos_init(ble_ota_host_task);
 }

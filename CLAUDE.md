@@ -76,7 +76,10 @@ No test suite exists yet in either the firmware or the app.
 exactly once (must not be duplicated per-service), then calls each service component's own
 `..._init()`, and fans out GAP connect/disconnect/subscribe callbacks to whichever services
 registered interest. It also owns the boot-time OTA rollback confirmation (`self_check_ok()`),
-since that's about the currently-running app, not any one service.
+since that's about the currently-running app, not any one service. Connection-level (not
+service-specific) BLE config lives here too: the Security Manager setup (`ble_hs_cfg.sm_*`,
+`ble_store_config_init()` for persisted bonds - see `ble-ota/README.md`'s security section) and an
+example `ble_gap_update_params()` connection-parameter request sent right after connect.
 
 Each `components/*_service/` is independent and exposes its own GATT service:
 
@@ -95,7 +98,12 @@ Each `components/*_service/` is independent and exposes its own GATT service:
 - `led_service` - custom service `...1bb0`: one Config characteristic (7-byte: mode, R, G, B,
   brightness, blink_interval_ms). Writes apply to the LED immediately **and** persist to NVS
   (survives reboots/power loss) - this replaced an earlier Kconfig-based approach specifically so
-  LED behavior could change without a rebuild/reflash.
+  LED behavior could change without a rebuild/reflash. This is also the project's one **security
+  example**: read/write require an encrypted link (`BLE_GATT_CHR_F_READ_ENC`/`WRITE_ENC`), and
+  successful writes go out as an **Indication** (not Notify) - deliberately contrasted with Heart
+  Rate's Notify. OTA and Heart Rate stay unauthenticated/unencrypted on purpose - see
+  `ble-ota/README.md`'s "Security: pairing and bonding" section, which as of this writing is
+  implemented and compiles but **not yet flashed/verified on real hardware**.
 - `heart_rate_service` - **standard** Bluetooth SIG Heart Rate service (0x180D/0x2A37/0x2A38, not
   custom), plus one custom Rate Control characteristic to switch the simulated BPM's notify rate
   between ~1/s (realistic) and ~20/s (deliberately fast, for exercising client backpressure).

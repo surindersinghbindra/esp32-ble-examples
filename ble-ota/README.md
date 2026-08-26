@@ -160,11 +160,14 @@ exactly this reason - see `android-ota-app/README.md` for the client-side detail
 
 ## What this example does *not* do (read before shipping anything)
 
-- **No authentication or encryption on the OTA transfer.** Any BLE central in range can connect
-  and push firmware. For anything beyond a bench test, add BLE bonding/encryption (see the
-  `bleprph` example under `nimble/` in ESP-IDF for `sm_bonding`/`sm_mitm`/`sm_sc` and
-  `BLE_GATT_CHR_F_WRITE_ENC`) and/or verify a cryptographic signature on the image before calling
-  `esp_ota_set_boot_partition()`.
+- **No authentication or encryption on the OTA transfer, deliberately.** Any BLE central in range
+  can still connect and push firmware. Pairing/bonding *is* now wired up project-wide (see
+  "Security: pairing and bonding" below) - it was deliberately left off the OTA Control/Data/
+  Version characteristics rather than applied everywhere, so this section's warning stays accurate
+  for the one path where it matters most: **anyone nearby can still push a firmware image without
+  pairing first.** For anything beyond a bench test, add `BLE_GATT_CHR_F_WRITE_ENC` (and
+  `_READ_ENC`) to `ota_service.c`'s characteristic definitions the same way `led_service.c` does,
+  and/or verify a cryptographic signature on the image before calling `esp_ota_set_boot_partition()`.
 - **No rollback-protection against re-installing an older version.** The Version characteristic
   and the version check in the clients (see below) only *warn* on a match - they don't inspect
   version numbers to block a downgrade, and there is no anti-rollback eFuse configured
@@ -181,7 +184,7 @@ Custom service `f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1bb0` with one characteristic:
 
 | Characteristic | UUID | Properties | Purpose |
 |---|---|---|---|
-| Config | `...bb1` | read, write | Get/set color, mode, brightness, blink timing |
+| Config | `...bb1` | read, write, indicate; read/write require an **encrypted link** | Get/set color, mode, brightness, blink timing |
 
 This is **live, runtime configuration** - not the old Kconfig-based approach (that's gone; see the
 git history if you want to compare). A write is applied to the LED immediately *and* saved to NVS
@@ -197,6 +200,64 @@ Wire format, 7 bytes, same layout whether reading or writing:
 | 1-3 | red, green, blue | `0-255` each |
 | 4 | brightness | `0-255` - scales red/green/blue down before display |
 | 5-6 | blink_interval_ms | uint16, little-endian; only used in blink mode |
+
+This is also the one characteristic in the project that requires pairing (see below) and uses an
+**Indication** rather than a Notification: subscribe to it, and every successful write indicates
+the new config back out, with NimBLE tracking the peer's acknowledgment of each one - deliberately
+different from Heart Rate's fire-and-forget Notify, since a lost "the LED changed" confirmation
+matters more than a lost heartbeat sample.
+
+## Security: pairing and bonding
+
+Every characteristic in this project used to run at Security Mode 1 / Level 1 (no security at
+all) - anyone in range could read/write anything with no pairing step. That's still true for the
+OTA and Heart Rate services (see the warning above), but `main.c` now configures NimBLE's Security
+Manager project-wide:
+
+```c
+ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_NO_IO;   /* no display/keyboard -> Just Works pairing */
+ble_hs_cfg.sm_bonding = 1;                    /* remember the pairing across reconnects */
+ble_hs_cfg.sm_mitm = 0;                       /* Just Works has no MITM protection - honest, not a bug */
+ble_hs_cfg.sm_sc = 1;                         /* LE Secure Connections, not legacy pairing */
+```
+
+plus `ble_store_config_init()` so bonds persist in NVS across reboots (`CONFIG_BT_NIMBLE_NVS_PERSIST=y`
+in `sdkconfig.defaults`), and a `BLE_GAP_EVENT_REPEAT_PAIRING` handler that deletes a stale bond and
+retries rather than permanently locking out a peer that lost its half (e.g. "Forget device" on the
+phone).
+
+None of this *forces* a connection to pair on its own - nothing here calls
+`ble_gap_security_initiate()`. Pairing actually kicks off the first time a central touches an
+encryption-requiring attribute (the LED Config characteristic above) and its BLE stack reacts to
+the resulting ATT error by starting the Security Manager procedure itself; Android's `BluetoothGatt`
+does this automatically. In the Bluetooth spec's terms, that characteristic is now Security Mode 1
+/ Level 2: unauthenticated pairing with encryption, no MITM protection - deliberately the simplest
+level that still exercises real pairing, matched to this board having no display or keyboard for
+anything stronger (Passkey Entry, Numeric Comparison).
+
+**Status: implemented and compiles, not yet flashed/tested on hardware.** Unlike the rest of this
+README, this section describes code that hasn't been run on the board yet - expect the first
+LED-config read/write after this firmware is flashed to trigger a pairing request, which on Android
+may or may not surface a system prompt depending on the phone/OS version (see the L2CAP CoC section
+above for a reminder that this board's usual test phone, a Redmi/Xiaomi device, has shown
+OEM-specific BLE quirks before). Update this note once it's been verified.
+
+**Not implemented**: a Filter Accept List (only allow already-bonded peers to connect at all,
+rather than just gating individual characteristics) would be the natural next step - NimBLE
+supports it via `ble_gap_adv_start()`'s filter policy, but it adds real complexity (managing the
+accept list as bonds are created/deleted) for a single-user bench project where anyone nearby
+being able to *see* the device isn't the actual risk.
+
+## Connection parameters
+
+Right after a connection is established, `main.c` calls `ble_gap_update_params()` asking for a
+30-50ms interval, no slave latency, and a 4s supervision timeout - the usual reason a peripheral
+does this at all is trading a little responsiveness for lower power draw versus whatever the
+central proposed by default. The outcome (accepted as-is, or renegotiated) comes back as a
+`BLE_GAP_EVENT_CONN_UPDATE` and is only logged, not acted on further. The firmware never requests
+anything beyond this one fixed request - it doesn't, for example, ask for tighter parameters during
+an OTA transfer and relax them afterward, which would be the natural next step if transfer speed
+ever needed to improve without touching the data path itself.
 
 ## GATT protocol: Heart Rate service (`components/heart_rate_service/`)
 

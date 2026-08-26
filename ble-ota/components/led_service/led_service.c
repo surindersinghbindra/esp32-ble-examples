@@ -14,6 +14,38 @@
  *   byte 3   blue   (0-255)
  *   byte 4   brightness (0-255) - scales red/green/blue down before display
  *   byte 5-6 blink_interval_ms, little-endian uint16 (blink mode only)
+ *
+ * --- Security example: encrypted access + an Indication ---
+ *
+ * Unlike the OTA and Heart Rate services, this characteristic's Read/Write
+ * flags are paired with BLE_GATT_CHR_F_READ_ENC / BLE_GATT_CHR_F_WRITE_ENC
+ * (see the definition below). That combination - a plain flag plus its _ENC
+ * counterpart - tells NimBLE "this operation is supported, but only over an
+ * encrypted link." The first time a central touches this characteristic
+ * without one, NimBLE responds with an insufficient-authentication/
+ * encryption ATT error instead of the read/write result; a well-behaved
+ * central (Android's BluetoothGatt included) reacts to that error by
+ * starting pairing itself, which is what actually gets this project's
+ * Security Manager exercised for the first time - see main.c's
+ * ble_hs_cfg.sm_* setup for the pairing/bonding config this relies on.
+ *
+ * This is Security Mode 1, Level 2 in the Bluetooth spec's terms:
+ * unauthenticated pairing (Just Works, since this board has no display or
+ * keyboard to do better) with encryption, but no protection against a
+ * man-in-the-middle. Deliberately left off the OTA characteristics, whose
+ * existing unauthenticated behavior is documented and tested elsewhere -
+ * this one characteristic is the contained example.
+ *
+ * The characteristic also adds BLE_GATT_CHR_F_INDICATE (not Notify): once a
+ * client subscribes, every successful write triggers an Indication of the
+ * new config back out, deliberately contrasted with the Heart Rate
+ * service's Notifications - an Indication requires the peer's BLE stack to
+ * acknowledge receipt before the next one can be sent (tracked here via
+ * ble_gatts_indicate() and, in main.c, the BLE_GAP_EVENT_NOTIFY_TX event),
+ * where a Notification is fire-and-forget. That tradeoff (guaranteed
+ * delivery vs. no flow-control overhead) is exactly why Heart Rate's
+ * standard-mandated Measurement characteristic uses Notify: correct
+ * behavior there is to keep going even if one beat's notification is lost.
  */
 
 #include <string.h>
@@ -62,6 +94,9 @@ typedef struct {
 static uint16_t s_led_config_val_handle;
 static led_config_t s_config;
 static SemaphoreHandle_t s_config_mutex;
+
+static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+static bool s_indicate_enabled;
 
 static void encode_config(const led_config_t *cfg, uint8_t out[LED_CONFIG_WIRE_LEN])
 {
@@ -185,6 +220,15 @@ led_config_access_cb(uint16_t conn_handle, uint16_t attr_handle,
     ESP_LOGI(TAG, "LED config updated: mode=%d rgb=(%d,%d,%d) brightness=%d blink_ms=%d",
              cfg.mode, cfg.red, cfg.green, cfg.blue, cfg.brightness, cfg.blink_interval_ms);
 
+    /* Confirm the new config back to whoever is subscribed, via Indication
+     * rather than Notification - see the file-level comment above for why. */
+    if (s_indicate_enabled && s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        int ind_rc = ble_gatts_indicate(s_conn_handle, s_led_config_val_handle);
+        if (ind_rc != 0) {
+            ESP_LOGW(TAG, "Failed to send LED config indication: rc=%d", ind_rc);
+        }
+    }
+
     return 0;
 }
 
@@ -197,7 +241,9 @@ static const struct ble_gatt_svc_def led_service_svcs[] = {
                 .uuid = &led_chr_config_uuid.u,
                 .access_cb = led_config_access_cb,
                 .val_handle = &s_led_config_val_handle,
-                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE |
+                         BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_WRITE_ENC |
+                         BLE_GATT_CHR_F_INDICATE,
             }, {
                 0, /* No more characteristics in this service. */
             },
@@ -259,6 +305,24 @@ static void led_task(void *arg)
              * without needing its own task-notification plumbing. */
             vTaskDelay(pdMS_TO_TICKS(300));
         }
+    }
+}
+
+void led_service_on_connect(uint16_t conn_handle)
+{
+    s_conn_handle = conn_handle;
+}
+
+void led_service_on_disconnect(void)
+{
+    s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    s_indicate_enabled = false;
+}
+
+void led_service_on_subscribe(uint16_t attr_handle, bool cur_indicate)
+{
+    if (attr_handle == s_led_config_val_handle) {
+        s_indicate_enabled = cur_indicate;
     }
 }
 
