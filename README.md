@@ -9,8 +9,9 @@ commands from there.
 | Folder | Description |
 |---|---|
 | [`led-blink/`](led-blink/) | Blinks the onboard addressable RGB LED, cycling through a different color on each blink. |
+| [`ble-ota/`](ble-ota/) | Pushes a new firmware image over BLE into a dual-partition (ota_0/ota_1) layout, with rollback protection if the new image never confirms itself healthy. |
 
-More examples (BLE, etc.) will be added as new subfolders alongside `led-blink/`.
+More examples will be added as new subfolders alongside these.
 
 ## Prerequisites (shared across all examples)
 
