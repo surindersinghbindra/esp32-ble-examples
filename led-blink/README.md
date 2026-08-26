@@ -67,34 +67,8 @@ To change the color sequence itself, edit the `s_colors[][3]` array near the top
 [`main/blink_example_main.c`](main/blink_example_main.c) — each entry is an `{R, G, B}` triple
 from 0–255.
 
-## Mental Model: ESP-IDF vs. Android Projects
-
-If you're coming from Android/Gradle development, here's a rough mapping to help orient yourself
-in an ESP-IDF project:
-
-| ESP-IDF (this project) | Android | Role |
-|---|---|---|
-| `CMakeLists.txt` (top-level) | `settings.gradle` + top-level `build.gradle` | Declares the project and pulls in the build system |
-| `main/CMakeLists.txt` | `app/build.gradle` | Module-level: sources + deps for this component |
-| `main/idf_component.yml` | `dependencies { }` block in `build.gradle` | Declares external libraries (here: `led_strip`) |
-| `dependencies.lock` | `gradle.lockfile` / resolved version lock | Pins exact resolved dependency versions |
-| `managed_components/` | Gradle dependency cache (`~/.gradle/caches`) | Downloaded library sources, not hand-edited |
-| `sdkconfig` + `sdkconfig.defaults*` | `gradle.properties` + build variants/flavors | Project-wide config flags, some per-target |
-| `main/Kconfig.projbuild` | Custom Gradle DSL / BuildConfig fields | Defines the configurable options (shows up in `idf.py menuconfig`, the way flavor options show up in Android Studio) |
-| `main/blink_example_main.c` → `app_main()` | `MainActivity.kt` → `onCreate()` | Entry point the framework calls into |
-| `build/` → `blink.bin` | `app/build/` → `app-debug.apk` | Compiled, flashable/installable artifact |
-| `idf.py` | `./gradlew` | Wrapper script driving the whole build |
-| `idf.py set-target esp32c6` | Product flavor / ABI split (`arm64-v8a`, etc.) | Picks which hardware variant you're building for |
-| `idf.py -p PORT flash` | `./gradlew installDebug` / `adb install` | Pushes the built artifact onto the physical device |
-| `idf.py monitor` | `adb logcat` | Streams the device's live log output |
-| `~/.espressif/v6.1-beta1/esp-idf` (the SDK) | `~/Library/Android/sdk` | Shared toolchain/platform install, versioned independently of any one project |
-| `.vscode/settings.json` (`idf.currentSetup`) | `local.properties` (`sdk.dir=...`) | Machine-local path to the SDK; not meant to be portable across machines (gitignored) |
-
-**Where the analogy breaks down:** there's no OS, no VM, no activity lifecycle, no UI toolkit.
-`app_main()` runs once on a FreeRTOS task and *is* the whole program — the `while (1) { ...
-vTaskDelay(...) }` loop in `blink_example_main.c` is closer to a raw background thread's run loop
-than anything in Android's lifecycle. And "the LED" here isn't a widget, it's a physical
-GPIO/WS2812 pin — there's no view hierarchy underneath it.
+For a mental model of how this project's structure maps to Android/Gradle concepts, see the
+[repo-level README](../README.md#mental-model-esp-idf-vs-android-projects).
 
 ## License
 

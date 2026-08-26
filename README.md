@@ -29,3 +29,35 @@ idf.py -p /dev/cu.usbserial-10 flash monitor       # replace with your board's s
 
 See each example's own `README.md` for project-specific details, structure, and configuration
 options.
+
+## Mental Model: ESP-IDF vs. Android Projects
+
+If you're coming from Android/Gradle development, here's a rough mapping to help orient yourself
+in an ESP-IDF project (using [`led-blink/`](led-blink/) as the reference example):
+
+| ESP-IDF (example project) | Android | Role |
+|---|---|---|
+| `led-blink/CMakeLists.txt` (top-level) | `settings.gradle` + top-level `build.gradle` | Declares the project and pulls in the build system |
+| `led-blink/main/CMakeLists.txt` | `app/build.gradle` | Module-level: sources + deps for this component |
+| `led-blink/main/idf_component.yml` | `dependencies { }` block in `build.gradle` | Declares external libraries (here: `led_strip`) |
+| `led-blink/dependencies.lock` | `gradle.lockfile` / resolved version lock | Pins exact resolved dependency versions |
+| `led-blink/managed_components/` | Gradle dependency cache (`~/.gradle/caches`) | Downloaded library sources, not hand-edited |
+| `sdkconfig` + `sdkconfig.defaults*` | `gradle.properties` + build variants/flavors | Project-wide config flags, some per-target |
+| `led-blink/main/Kconfig.projbuild` | Custom Gradle DSL / BuildConfig fields | Defines the configurable options (shows up in `idf.py menuconfig`, the way flavor options show up in Android Studio) |
+| `led-blink/main/blink_example_main.c` → `app_main()` | `MainActivity.kt` → `onCreate()` | Entry point the framework calls into |
+| `led-blink/build/` → `blink.bin` | `app/build/` → `app-debug.apk` | Compiled, flashable/installable artifact |
+| `idf.py` | `./gradlew` | Wrapper script driving the whole build |
+| `idf.py set-target esp32c6` | Product flavor / ABI split (`arm64-v8a`, etc.) | Picks which hardware variant you're building for |
+| `idf.py -p PORT flash` | `./gradlew installDebug` / `adb install` | Pushes the built artifact onto the physical device |
+| `idf.py monitor` | `adb logcat` | Streams the device's live log output |
+| `~/.espressif/v6.1-beta1/esp-idf` (the SDK) | `~/Library/Android/sdk` | Shared toolchain/platform install, versioned independently of any one project |
+| `.vscode/settings.json` (`idf.currentSetup`) | `local.properties` (`sdk.dir=...`) | Machine-local path to the SDK; not meant to be portable across machines (gitignored) |
+
+**Where the analogy breaks down:** there's no OS, no VM, no activity lifecycle, no UI toolkit.
+`app_main()` runs once on a FreeRTOS task and *is* the whole program — a `while (1) { ...
+vTaskDelay(...) }` loop is closer to a raw background thread's run loop than anything in Android's
+lifecycle. And "the LED" in `led-blink/` isn't a widget, it's a physical GPIO/WS2812 pin — there's
+no view hierarchy underneath it.
+
+This mapping is per-project — as more examples are added alongside `led-blink/`, each will have
+its own `CMakeLists.txt`, `main/`, etc. in the same roles.
