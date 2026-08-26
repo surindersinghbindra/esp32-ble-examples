@@ -20,11 +20,14 @@ import com.esp32ble.ota.domain.model.BleOtaException
 import com.esp32ble.ota.domain.model.HeartRateSample
 import com.esp32ble.ota.domain.model.LedConfig
 import com.esp32ble.ota.domain.model.OtaTransferEvent
+import com.esp32ble.ota.domain.model.OtaTransport
 import com.esp32ble.ota.domain.repository.BleOtaRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.catch
@@ -33,6 +36,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 
 /**
@@ -395,15 +399,20 @@ class BleOtaRepositoryImpl(private val context: Context) : BleOtaRepository {
         }
     }
 
-    override fun performOtaUpdate(firmware: ByteArray): Flow<OtaTransferEvent> = flow {
+    override fun performOtaUpdate(
+        firmware: ByteArray,
+        transport: OtaTransport,
+    ): Flow<OtaTransferEvent> = flow {
         opMutex.withLock {
             val g = gatt ?: throw BleOtaException("Not connected")
             val ctrl = controlChar ?: throw BleOtaException("Not connected")
-            val data = dataChar ?: throw BleOtaException("Not connected")
 
             // Discard any stale status byte left over from a previous run.
             while (statusNotifications.tryReceive().isSuccess) { /* drain */ }
 
+            // START/END/REBOOT and the status they trigger always go over the tiny Control
+            // characteristic regardless of transport - ATT overhead only matters for the bulk
+            // data below, not for single command/status bytes.
             writeControlCommand(g, ctrl, BleOtaProtocol.CMD_START)
             val startStatus = withTimeout(5_000) { statusNotifications.receive() }
             if (startStatus != BleOtaProtocol.STATUS_IN_PROGRESS) {
@@ -411,18 +420,9 @@ class BleOtaRepositoryImpl(private val context: Context) : BleOtaRepository {
                 return@withLock
             }
 
-            // The firmware's data characteristic buffer (OTA_DATA_MAX_CHUNK in gatt_svr.c) is a
-            // fixed 512 bytes, so cap here even if a larger MTU gets negotiated - otherwise the
-            // device correctly (and safely) rejects the oversized write with GATT_INVALID_ATTRIBUTE_LENGTH.
-            val chunkSize = (negotiatedMtu - 3).coerceIn(20, 512)
-            var sent = 0
-            var offset = 0
-            while (offset < firmware.size) {
-                val end = (offset + chunkSize).coerceAtMost(firmware.size)
-                writeDataChunk(g, data, firmware.copyOfRange(offset, end))
-                sent += end - offset
-                offset = end
-                emit(OtaTransferEvent.Progress(sent, firmware.size))
+            when (transport) {
+                OtaTransport.GATT -> streamFirmwareViaGatt(g, firmware)
+                OtaTransport.L2CAP_COC -> streamFirmwareViaL2cap(g.device, firmware)
             }
 
             emit(OtaTransferEvent.Validating)
@@ -436,6 +436,83 @@ class BleOtaRepositoryImpl(private val context: Context) : BleOtaRepository {
         }
     }.catch { e ->
         emit(OtaTransferEvent.Failure(e.message ?: "Unknown BLE error"))
+    }
+
+    /**
+     * Default transport: one GATT write per chunk, each an ATT request that waits for the
+     * device's response before the next one goes out (see `writeDataChunk` below) - reliable,
+     * always available, but every chunk pays a full protocol round trip.
+     *
+     * This is declared as an extension function on `FlowCollector<OtaTransferEvent>` (the type
+     * the `flow { ... }` builder above gives its lambda) purely so it can call `emit(...)`
+     * directly, the same as if this code were written inline in that lambda. Kotlin lets you
+     * write a function "as if it were a member" of any type this way - here it means the
+     * progress-reporting logic can live in its own well-named function instead of being nested
+     * inline, without losing the ability to emit into the same flow.
+     */
+    private suspend fun FlowCollector<OtaTransferEvent>.streamFirmwareViaGatt(
+        g: BluetoothGatt,
+        firmware: ByteArray,
+    ) {
+        val data = dataChar ?: throw BleOtaException("Not connected")
+        // The firmware's data characteristic buffer (OTA_DATA_MAX_CHUNK in ota_service.c) is a
+        // fixed 512 bytes, so cap here even if a larger MTU gets negotiated - otherwise the
+        // device correctly (and safely) rejects the oversized write with GATT_INVALID_ATTRIBUTE_LENGTH.
+        val chunkSize = (negotiatedMtu - 3).coerceIn(20, 512)
+        var sent = 0
+        var offset = 0
+        while (offset < firmware.size) {
+            val end = (offset + chunkSize).coerceAtMost(firmware.size)
+            writeDataChunk(g, data, firmware.copyOfRange(offset, end))
+            sent += end - offset
+            offset = end
+            emit(OtaTransferEvent.Progress(sent, firmware.size))
+        }
+    }
+
+    /**
+     * Educational fast path: opens a raw L2CAP CoC (Connection-Oriented Channel) socket straight
+     * to the firmware's fixed PSM and streams the whole image through it as plain bytes - no ATT
+     * framing, no per-chunk request/response. `BluetoothSocket.getOutputStream().write(...)` is a
+     * *blocking* call here: it only returns once the underlying L2CAP credit-based flow control
+     * allows more data out, which is why this loop needs no manual pacing or backpressure logic
+     * of its own, unlike the GATT path above (which waits on an explicit ATT response per chunk)
+     * or the heart-rate notification path (which needs its own buffering, see `observeHeartRate`).
+     *
+     * This is deliberately simple for learning purposes, not a hardened implementation - see the
+     * README for what a production version would need to add (proper error recovery if the
+     * socket drops mid-transfer, tuning the chunk size against the negotiated L2CAP MPS rather
+     * than assuming a fixed value that must match the firmware exactly).
+     */
+    private suspend fun FlowCollector<OtaTransferEvent>.streamFirmwareViaL2cap(
+        device: BluetoothDevice,
+        firmware: ByteArray,
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            throw BleOtaException("L2CAP CoC requires Android 10 (API 29) or newer")
+        }
+
+        // Opening the channel and connecting are both blocking calls - IO dispatcher, not Main.
+        val socket = withContext(Dispatchers.IO) { device.createL2capChannel(OtaL2capProtocol.PSM) }
+        try {
+            withContext(Dispatchers.IO) { socket.connect() }
+
+            val chunkSize = OtaL2capProtocol.CHUNK_SIZE
+            var sent = 0
+            var offset = 0
+            while (offset < firmware.size) {
+                val end = (offset + chunkSize).coerceAtMost(firmware.size)
+                withContext(Dispatchers.IO) {
+                    socket.outputStream.write(firmware, offset, end - offset)
+                }
+                sent += end - offset
+                offset = end
+                emit(OtaTransferEvent.Progress(sent, firmware.size))
+            }
+            withContext(Dispatchers.IO) { socket.outputStream.flush() }
+        } finally {
+            withContext(Dispatchers.IO) { runCatching { socket.close() } }
+        }
     }
 
     override suspend fun reboot(): Result<Unit> = opMutex.withLock {

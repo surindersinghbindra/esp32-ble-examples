@@ -94,6 +94,37 @@ Custom service `f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1ba0` with three characteristics
 | `0x02` | SUCCESS |
 | `0x03` | ERROR |
 
+## Fast-update path: L2CAP CoC (educational)
+
+Every GATT write - including the Data characteristic above - travels as one ATT (Attribute
+Protocol) packet per call, each a full request/response round trip. **L2CAP CoC** (Connection-
+Oriented Channel) is a different, lower layer of the Bluetooth stack: instead of characteristics,
+it's a private credit-based data pipe identified by a **PSM** (Protocol/Service Multiplexer - the
+L2CAP equivalent of a TCP port). Once open, both sides exchange raw SDUs with no ATT framing at
+all. This is the same mechanism real high-throughput BLE profiles (audio, fast firmware transfer)
+use to get meaningfully better throughput than plain GATT.
+
+`ota_service` registers an L2CAP CoC server once at boot, listening on a fixed PSM (`0x00F0`,
+chosen from the LE dynamic range `0x0080`-`0x00FF`), as an alternative path for the bulk firmware
+bytes only - START/END/REBOOT and status still go over the Control characteristic either way,
+since ATT overhead is irrelevant for single bytes. See the big comment at the top of
+`ota_service.c` for the technical detail (SDUs, credit-based flow control, why re-arming the
+receive buffer doubles as the flow-control point).
+
+**This is explicitly a learning example, not a hardened path** - fixed PSM instead of negotiated,
+fixed buffer sizing, no reconnection handling.
+
+**Verified finding, honestly reported:** the firmware side works correctly - confirmed via the
+boot log (`OTA fast-update L2CAP CoC server listening on PSM 0x00f0`) across multiple test
+attempts. The Android companion app's client-side connection (`BluetoothDevice.createL2capChannel`)
+consistently failed to connect on the specific test phone used (a Redmi/Xiaomi device, Android 12)
+with no corresponding L2CAP event ever appearing in this firmware's log - meaning the connection
+attempt never even reached the board. This points to the phone's own Bluetooth HAL not reliably
+supporting the L2CAP CoC *initiator* (client) role, which is a known, widely-reported
+inconsistency across Android OEM Bluetooth stacks for this specific API (available since Android
+10, but not uniformly implemented underneath it). The GATT path remains the reliable default for
+exactly this reason - see `android-ota-app/README.md` for the client-side detail and code.
+
 ## Precautions this example takes (and why)
 
 1. **No factory partition - only ota_0 / ota_1.** `CONFIG_PARTITION_TABLE_TWO_OTA_LARGE=y`

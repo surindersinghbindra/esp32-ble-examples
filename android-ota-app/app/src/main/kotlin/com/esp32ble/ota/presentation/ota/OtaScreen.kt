@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import com.esp32ble.ota.domain.model.BleDeviceInfo
 import com.esp32ble.ota.domain.model.LedConfig
 import com.esp32ble.ota.domain.model.LedMode
+import com.esp32ble.ota.domain.model.OtaTransport
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -61,6 +62,8 @@ fun OtaScreen(
     heartRateHistory: List<Int>,
     onToggleHeartRate: () -> Unit,
     onSetHeartRateFastMode: (Boolean) -> Unit,
+    otaTransport: OtaTransport,
+    onSetOtaTransport: (OtaTransport) -> Unit,
 ) {
     Scaffold(topBar = { TopAppBar(title = { Text("ESP32 BLE OTA") }) }) { padding ->
         Column(
@@ -79,6 +82,7 @@ fun OtaScreen(
                 is OtaUiState.Connected -> {
                     ConnectedContent(
                         state, onUseBundledFirmware, onPickFirmware, onStartUpdate, onDisconnect,
+                        otaTransport, onSetOtaTransport,
                     )
                     LedControlSection(ledConfig, onSetLedMode, onSetLedColor, onSetLedBrightness, onSetLedBlinkIntervalMs)
                     HeartRateSection(
@@ -138,6 +142,8 @@ private fun ConnectedContent(
     onPickFirmware: () -> Unit,
     onStartUpdate: () -> Unit,
     onDisconnect: () -> Unit,
+    otaTransport: OtaTransport,
+    onSetOtaTransport: (OtaTransport) -> Unit,
 ) {
     Text("Connected to ${state.device.name ?: state.device.address}")
     Text("Negotiated ATT MTU: ${state.mtu}")
@@ -157,6 +163,28 @@ private fun ConnectedContent(
         OutlinedButton(onClick = onUseBundledFirmware) { Text("Use bundled firmware") }
         OutlinedButton(onClick = onPickFirmware) { Text("Pick file...") }
     }
+
+    // "L2CAP CoC" is an advanced, optional transport for the bulk transfer only - see the
+    // OtaTransport enum's KDoc and ble-ota/README.md for the technical explanation. It's opt-in
+    // and clearly labeled since it's an educational demonstration, not the hardened default path.
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Fast update mode (L2CAP CoC)")
+        Switch(
+            checked = otaTransport == OtaTransport.L2CAP_COC,
+            onCheckedChange = { checked ->
+                onSetOtaTransport(if (checked) OtaTransport.L2CAP_COC else OtaTransport.GATT)
+            },
+        )
+    }
+    if (otaTransport == OtaTransport.L2CAP_COC) {
+        Text(
+            "Educational/experimental: streams firmware bytes over a raw L2CAP Connection-" +
+                "Oriented Channel (PSM 0x00F0) instead of one GATT ATT write per chunk, " +
+                "bypassing per-packet Attribute Protocol overhead. Requires Android 10+. " +
+                "START/END/REBOOT still use the normal Control characteristic either way.",
+        )
+    }
+
     Button(onClick = onStartUpdate, enabled = state.firmware != null) { Text("Start Update") }
     OutlinedButton(onClick = onDisconnect) { Text("Disconnect") }
 }

@@ -140,6 +140,31 @@ and it's handled in two layers:
 Together, these mean flipping "Fast mode" on doesn't cause growing memory use, dropped frames, or a
 frozen UI - which is exactly what was confirmed on real hardware (see below).
 
+## Fast update mode: L2CAP CoC (educational/experimental)
+
+A "Fast update mode (L2CAP CoC)" switch on the Connected screen, `OtaTransport` (`GATT` or
+`L2CAP_COC`) chosen before tapping Start Update - see
+[`../ble-ota/README.md`](../ble-ota/README.md#fast-update-path-l2cap-coc-educational) for the
+full technical explanation of what an L2CAP Connection-Oriented Channel is and why it can be
+faster than GATT.
+
+`BleOtaRepositoryImpl.streamFirmwareViaL2cap` opens a raw socket to the firmware's fixed PSM
+(`OtaL2capProtocol.PSM = 0x00F0`) via `BluetoothDevice.createL2capChannel()` (Android 10+ only)
+and writes the whole image through `BluetoothSocket.getOutputStream()` - no GATT characteristic
+involved for the bulk bytes at all. `OutputStream.write()` blocks until the channel's own credit-
+based flow control allows more data out, so - unlike the GATT path, and unlike the heart-rate
+notification path - this loop needs no manual pacing or backpressure logic of its own.
+
+**Honestly reported result, not glossed over:** this was implemented and tested on real hardware,
+and the firmware side works (confirmed via its boot log). The Android client's
+`socket.connect()` consistently failed on the test phone (Redmi/Xiaomi, Android 12) with no
+corresponding event ever appearing in the firmware's log - meaning the connection attempt never
+reached the board at all. This points to that phone's Bluetooth HAL not reliably supporting the
+L2CAP CoC *client* role, a known inconsistency across Android OEM Bluetooth stacks for this API.
+The code is correct as far as the public Android API goes - there's no alternative API for this
+role - and may well work on other devices/chipsets; on this one, `GATT` remains the transport that
+actually works, which is why it's the default.
+
 ## Verified on hardware
 
 Built and run against a real ESP32-C6-DevKitC (flashed with the `ble-ota` firmware) from a

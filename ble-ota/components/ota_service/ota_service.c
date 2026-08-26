@@ -27,6 +27,31 @@
  * All the actual partition-safety logic (which of ota_0/ota_1 to target,
  * validating the image before switching the boot partition, aborting
  * cleanly on disconnect) lives here.
+ *
+ * --- Optional fast path: L2CAP CoC (educational) ---
+ *
+ * Every GATT write - including our Data characteristic above - travels as
+ * one ATT (Attribute Protocol) packet per call, each with its own
+ * request/response round trip. That's simple and always available, but it
+ * caps throughput: every chunk pays full protocol overhead regardless of
+ * size.
+ *
+ * L2CAP CoC (Connection-Oriented Channel) is a *different* layer of the
+ * Bluetooth stack, one level below ATT/GATT. Instead of characteristics, a
+ * CoC is a private, credit-based data pipe identified by a PSM (Protocol/
+ * Service Multiplexer - think of it like a TCP port number, but for L2CAP).
+ * Once open, both sides exchange raw SDUs (Service Data Units) with no ATT
+ * framing at all, and flow control happens via credits at the L2CAP layer
+ * itself rather than one write-then-wait-for-ack per chunk. This is the
+ * same mechanism real high-throughput BLE profiles (audio, fast firmware
+ * transfer) use to get meaningfully higher throughput than plain GATT.
+ *
+ * Here it's wired in as an alternative to the Data characteristic for the
+ * bulk firmware bytes only - START/END/REBOOT and status still go over the
+ * tiny Control characteristic above, since ATT overhead is irrelevant for
+ * single bytes. This is explicitly a learning example, not a hardened
+ * production path - see the README for what's simplified/missing (no
+ * dynamic PSM negotiation, fixed buffer sizing, no reconnection handling).
  */
 
 #include <assert.h>
@@ -39,6 +64,7 @@
 #include "esp_timer.h"
 
 #include "host/ble_hs.h"
+#include "host/ble_l2cap.h"
 #include "host/ble_uuid.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
@@ -72,6 +98,14 @@ static const ble_uuid128_t ota_chr_version_uuid =
 #define OTA_STATUS_ERROR       0x03
 
 #define OTA_DATA_MAX_CHUNK 512
+
+/* --- L2CAP CoC fast path (educational; see the big comment above) ---
+ * PSM chosen from the LE dynamic range (0x0080-0x00FF per the Bluetooth Core
+ * spec) - arbitrary, just needs to match the client. MTU matches
+ * OTA_DATA_MAX_CHUNK so both data paths can share one receive buffer. */
+#define OTA_L2CAP_PSM        0x00F0
+#define OTA_L2CAP_MTU        OTA_DATA_MAX_CHUNK
+#define OTA_L2CAP_BUF_COUNT  6
 
 typedef enum {
     OTA_STATE_IDLE = 0,
@@ -247,16 +281,37 @@ ota_control_access_cb(uint16_t conn_handle, uint16_t attr_handle,
     return 0;
 }
 
+/*
+ * Shared by both data paths (GATT Data characteristic and the L2CAP CoC
+ * channel below): writes one chunk into the in-progress OTA handle. Returns
+ * false (and has already aborted + notified ERROR) on failure, so each
+ * caller only needs to decide how to surface that in its own transport's
+ * terms (an ATT error code for GATT; just a log line for L2CAP).
+ */
+static bool ota_write_chunk(const uint8_t *data, uint16_t len)
+{
+    if (s_ota_state != OTA_STATE_IN_PROGRESS) {
+        ESP_LOGW(TAG, "Dropping OTA data: no OTA in progress (send START first)");
+        return false;
+    }
+
+    esp_err_t err = esp_ota_write(s_ota_handle, data, len);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_write failed: %s", esp_err_to_name(err));
+        ota_abort_if_in_progress("esp_ota_write failure");
+        send_status(OTA_STATUS_ERROR);
+        return false;
+    }
+
+    s_ota_bytes_written += len;
+    return true;
+}
+
 static int
 ota_data_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                     struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
-        return BLE_ATT_ERR_UNLIKELY;
-    }
-
-    if (s_ota_state != OTA_STATE_IN_PROGRESS) {
-        ESP_LOGW(TAG, "Dropping OTA data: no OTA in progress (send START first)");
         return BLE_ATT_ERR_UNLIKELY;
     }
 
@@ -268,17 +323,103 @@ ota_data_access_cb(uint16_t conn_handle, uint16_t attr_handle,
         return rc;
     }
 
-    esp_err_t err = esp_ota_write(s_ota_handle, s_data_buf, len);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_ota_write failed: %s", esp_err_to_name(err));
-        ota_abort_if_in_progress("esp_ota_write failure");
-        send_status(OTA_STATUS_ERROR);
-        return BLE_ATT_ERR_UNLIKELY;
+    return ota_write_chunk(s_data_buf, len) ? 0 : BLE_ATT_ERR_UNLIKELY;
+}
+
+#if MYNEWT_VAL(BLE_L2CAP_COC_MAX_NUM) >= 1
+
+static os_membuf_t s_l2cap_mem[OS_MEMPOOL_SIZE(OTA_L2CAP_BUF_COUNT, OTA_L2CAP_MTU)];
+static struct os_mempool s_l2cap_mempool;
+static struct os_mbuf_pool s_l2cap_mbuf_pool;
+
+/* Allocates a fresh receive buffer and tells the L2CAP stack it's ready for
+ * the next SDU. This doubling as our flow-control point is deliberate: we
+ * only re-arm once we've actually drained the previous buffer into
+ * esp_ota_write(), so a slow flash write naturally throttles how fast the
+ * peer's credits refill - no separate backpressure mechanism needed here,
+ * unlike the heart-rate-over-GATT-notify case in the other services. */
+static int ota_l2cap_rearm(struct ble_l2cap_chan *chan)
+{
+    struct os_mbuf *sdu_rx = os_mbuf_get_pkthdr(&s_l2cap_mbuf_pool, 0);
+    if (sdu_rx == NULL) {
+        ESP_LOGE(TAG, "L2CAP: out of receive buffers");
+        return BLE_HS_ENOMEM;
+    }
+    return ble_l2cap_recv_ready(chan, sdu_rx);
+}
+
+static int ota_l2cap_event_cb(struct ble_l2cap_event *event, void *arg)
+{
+    switch (event->type) {
+    case BLE_L2CAP_EVENT_COC_CONNECTED:
+        if (event->connect.status != 0) {
+            ESP_LOGW(TAG, "L2CAP CoC connect failed: %d", event->connect.status);
+            return 0;
+        }
+        ESP_LOGI(TAG, "L2CAP CoC channel open - fast OTA data path ready");
+        return 0;
+
+    case BLE_L2CAP_EVENT_COC_DISCONNECTED:
+        ESP_LOGI(TAG, "L2CAP CoC channel closed");
+        return 0;
+
+    case BLE_L2CAP_EVENT_COC_ACCEPT:
+        /* A peer is opening a channel to our PSM; hand back a buffer so the
+         * stack can accept the connection. */
+        return ota_l2cap_rearm(event->accept.chan);
+
+    case BLE_L2CAP_EVENT_COC_DATA_RECEIVED: {
+        struct os_mbuf *sdu = event->receive.sdu_rx;
+        if (sdu != NULL) {
+            uint16_t len;
+            int rc = ble_hs_mbuf_to_flat(sdu, s_data_buf, sizeof(s_data_buf), &len);
+            os_mbuf_free_chain(sdu);
+            if (rc == 0) {
+                ota_write_chunk(s_data_buf, len);
+            } else {
+                ESP_LOGW(TAG, "L2CAP: received SDU too large for buffer, dropped");
+            }
+        }
+        /* Re-arm for the next SDU regardless of outcome above - a single bad
+         * chunk shouldn't wedge the channel; esp_ota_end() is what actually
+         * catches a corrupted overall transfer. */
+        ota_l2cap_rearm(event->receive.chan);
+        return 0;
     }
 
-    s_ota_bytes_written += len;
-    return 0;
+    default:
+        return 0;
+    }
 }
+
+static esp_err_t ota_l2cap_init(void)
+{
+    int rc = os_mempool_init(&s_l2cap_mempool, OTA_L2CAP_BUF_COUNT, OTA_L2CAP_MTU,
+                              s_l2cap_mem, "ota_l2cap_pool");
+    if (rc != 0) {
+        return ESP_FAIL;
+    }
+    rc = os_mbuf_pool_init(&s_l2cap_mbuf_pool, &s_l2cap_mempool, OTA_L2CAP_MTU,
+                            OTA_L2CAP_BUF_COUNT);
+    if (rc != 0) {
+        return ESP_FAIL;
+    }
+
+    /* Registered once, globally, at boot - not per-connection. This is a
+     * server listening on a PSM (like a TCP server socket on a port); it
+     * accepts a channel from whichever central connects and opens one. */
+    rc = ble_l2cap_create_server(OTA_L2CAP_PSM, OTA_L2CAP_MTU, ota_l2cap_event_cb, NULL);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to create OTA L2CAP CoC server: rc=%d", rc);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "OTA fast-update L2CAP CoC server listening on PSM 0x%04x (educational)",
+             OTA_L2CAP_PSM);
+    return ESP_OK;
+}
+
+#endif /* MYNEWT_VAL(BLE_L2CAP_COC_MAX_NUM) >= 1 */
 
 static int
 ota_version_access_cb(uint16_t conn_handle, uint16_t attr_handle,
@@ -368,6 +509,14 @@ ota_service_init(void)
     if (rc != 0) {
         return rc;
     }
+
+#if MYNEWT_VAL(BLE_L2CAP_COC_MAX_NUM) >= 1
+    /* Non-fatal if this fails - the GATT Data characteristic still works
+     * fine on its own; L2CAP CoC is strictly an optional fast path. */
+    ota_l2cap_init();
+#else
+    ESP_LOGW(TAG, "L2CAP CoC fast-update path disabled (CONFIG_BT_NIMBLE_L2CAP_COC_MAX_NUM=0)");
+#endif
 
     return 0;
 }

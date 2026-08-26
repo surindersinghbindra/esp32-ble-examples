@@ -6,6 +6,7 @@ import com.esp32ble.ota.domain.model.BleDeviceInfo
 import com.esp32ble.ota.domain.model.LedConfig
 import com.esp32ble.ota.domain.model.LedMode
 import com.esp32ble.ota.domain.model.OtaTransferEvent
+import com.esp32ble.ota.domain.model.OtaTransport
 import com.esp32ble.ota.domain.usecase.ConnectToDeviceUseCase
 import com.esp32ble.ota.domain.usecase.DisconnectDeviceUseCase
 import com.esp32ble.ota.domain.usecase.ExtractFirmwareVersionUseCase
@@ -65,6 +66,14 @@ class OtaViewModel(
     /** Sampled at a fixed rate (see startHeartRate) independent of how fast BLE notifies. */
     private val _heartRateHistory = MutableStateFlow<List<Int>>(emptyList())
     val heartRateHistory: StateFlow<List<Int>> = _heartRateHistory.asStateFlow()
+
+    /** Which transport the *next* Start Update tap will use - see [OtaTransport] for what this means. */
+    private val _otaTransport = MutableStateFlow(OtaTransport.GATT)
+    val otaTransport: StateFlow<OtaTransport> = _otaTransport.asStateFlow()
+
+    fun setOtaTransport(transport: OtaTransport) {
+        _otaTransport.value = transport
+    }
 
     private var currentDevice: BleDeviceInfo? = null
     private var pendingFirmware: ByteArray? = null
@@ -132,7 +141,7 @@ class OtaViewModel(
         val device = currentDevice ?: return
         val firmware = pendingFirmware ?: return
         viewModelScope.launch {
-            performOtaUpdate(firmware)
+            performOtaUpdate(firmware, _otaTransport.value)
                 .catch { e ->
                     _uiState.value = OtaUiState.UpdateFailed(device, e.message ?: "Unknown error")
                 }

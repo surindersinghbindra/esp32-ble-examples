@@ -41,3 +41,18 @@ object HeartRateProtocol {
     val BODY_SENSOR_LOCATION_CHAR_UUID: UUID = UUID.fromString("00002a38-0000-1000-8000-00805f9b34fb")
     val RATE_CONTROL_CHAR_UUID: UUID = UUID.fromString("f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1bc0")
 }
+
+/**
+ * Parameters for the *educational* L2CAP CoC fast-update path (see
+ * [com.esp32ble.ota.domain.model.OtaTransport.L2CAP_COC] for what this is and why it exists).
+ * This isn't a GATT service, so there's no UUID here - a PSM (Protocol/Service Multiplexer, the
+ * L2CAP equivalent of a TCP port number) plays the same "which endpoint do I want" role. Must
+ * match `OTA_L2CAP_PSM` / `OTA_L2CAP_MTU` in ble-ota/components/ota_service/ota_service.c.
+ */
+object OtaL2capProtocol {
+    /** Chosen from the LE dynamic PSM range (0x0080-0x00FF per the Bluetooth Core spec). */
+    const val PSM = 0x00F0
+
+    /** The firmware's receive buffer size; chunks larger than this would be dropped. */
+    const val CHUNK_SIZE = 512
+}

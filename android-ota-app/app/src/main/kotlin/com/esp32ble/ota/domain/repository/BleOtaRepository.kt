@@ -4,6 +4,7 @@ import com.esp32ble.ota.domain.model.BleDeviceInfo
 import com.esp32ble.ota.domain.model.HeartRateSample
 import com.esp32ble.ota.domain.model.LedConfig
 import com.esp32ble.ota.domain.model.OtaTransferEvent
+import com.esp32ble.ota.domain.model.OtaTransport
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -28,8 +29,11 @@ interface BleOtaRepository {
      * Streams [firmware] into whichever OTA partition the board isn't
      * currently running, emitting progress as it goes. The flow completes
      * after a terminal [OtaTransferEvent.Success] or [OtaTransferEvent.Failure].
+     *
+     * [transport] chooses how the bulk bytes travel; [OtaTransport.GATT] (the default) always
+     * works, [OtaTransport.L2CAP_COC] is the educational fast path - see that enum's docs.
      */
-    fun performOtaUpdate(firmware: ByteArray): Flow<OtaTransferEvent>
+    fun performOtaUpdate(firmware: ByteArray, transport: OtaTransport = OtaTransport.GATT): Flow<OtaTransferEvent>
 
     /** Tells the board to reboot into whichever partition is set as its boot target. */
     suspend fun reboot(): Result<Unit>

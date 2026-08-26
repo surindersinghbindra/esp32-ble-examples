@@ -2,6 +2,7 @@ package com.esp32ble.ota.domain.usecase
 
 import com.esp32ble.ota.domain.model.BleDeviceInfo
 import com.esp32ble.ota.domain.model.OtaTransferEvent
+import com.esp32ble.ota.domain.model.OtaTransport
 import com.esp32ble.ota.domain.repository.BleOtaRepository
 import kotlinx.coroutines.flow.Flow
 
@@ -25,8 +26,8 @@ class DisconnectDeviceUseCase(private val repository: BleOtaRepository) {
 }
 
 class PerformOtaUpdateUseCase(private val repository: BleOtaRepository) {
-    operator fun invoke(firmware: ByteArray): Flow<OtaTransferEvent> =
-        repository.performOtaUpdate(firmware)
+    operator fun invoke(firmware: ByteArray, transport: OtaTransport = OtaTransport.GATT): Flow<OtaTransferEvent> =
+        repository.performOtaUpdate(firmware, transport)
 }
 
 class RebootDeviceUseCase(private val repository: BleOtaRepository) {

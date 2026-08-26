@@ -10,6 +10,11 @@ CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4000
 # Negotiate a large ATT MTU so OTA data chunks aren't limited to ~20 bytes
 CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=517
 
+# Educational fast-update path: lets ota_service open an L2CAP CoC channel
+# (see the big comment in ota_service.c) as an alternative to the GATT Data
+# characteristic for bulk firmware bytes.
+CONFIG_BT_NIMBLE_L2CAP_COC_MAX_NUM=1
+
 # Dual-slot OTA partition table: ota_0 + ota_1 only, no factory partition.
 # Whichever slot is NOT currently running is always the OTA target, so a
 # bad update can never overwrite the only bootable image.

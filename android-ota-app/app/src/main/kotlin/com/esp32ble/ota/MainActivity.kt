@@ -74,6 +74,7 @@ class MainActivity : ComponentActivity() {
                     val heartRateFastMode by viewModel.heartRateFastMode.collectAsStateWithLifecycle()
                     val currentBpm by viewModel.currentBpm.collectAsStateWithLifecycle()
                     val heartRateHistory by viewModel.heartRateHistory.collectAsStateWithLifecycle()
+                    val otaTransport by viewModel.otaTransport.collectAsStateWithLifecycle()
                     OtaScreen(
                         state = uiState,
                         onScan = viewModel::startScan,
@@ -95,6 +96,8 @@ class MainActivity : ComponentActivity() {
                         heartRateHistory = heartRateHistory,
                         onToggleHeartRate = viewModel::toggleHeartRateSubscription,
                         onSetHeartRateFastMode = viewModel::setHeartRateFastMode,
+                        otaTransport = otaTransport,
+                        onSetOtaTransport = viewModel::setOtaTransport,
                     )
                 }
             }
