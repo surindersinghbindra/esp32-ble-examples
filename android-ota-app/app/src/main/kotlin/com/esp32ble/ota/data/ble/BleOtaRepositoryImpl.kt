@@ -22,6 +22,7 @@ import com.esp32ble.ota.domain.model.LedConfig
 import com.esp32ble.ota.domain.model.OtaTransferEvent
 import com.esp32ble.ota.domain.model.OtaTransport
 import com.esp32ble.ota.domain.repository.BleOtaRepository
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
@@ -38,6 +39,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import javax.inject.Inject
+import javax.inject.Singleton
 
 /**
  * Talks to the ble-ota firmware's custom GATT service (see ../../../../../../../ble-ota/main/gatt_svr.c
@@ -46,10 +49,25 @@ import kotlinx.coroutines.withTimeout
  * Android only allows one outstanding GATT operation per connection at a time, so every public
  * suspend function here runs under [opMutex]; callback results come back through [events] /
  * [statusNotifications], which the corresponding suspend call awaits.
+ *
+ * `@Singleton` tells Hilt to build this class exactly once for the whole app process and hand
+ * back that same instance every time something asks for a [BleOtaRepository] - essential here,
+ * since a live `BluetoothGatt` connection (`gatt` below) needs to be shared across every screen
+ * that touches it, not recreated per-screen. Without this annotation, Hilt's default is to build
+ * a fresh instance at every injection site, which would silently break the whole "stay connected
+ * while navigating the app" assumption everything else here relies on.
  */
+@Singleton
 @SuppressLint("MissingPermission") // Permissions are requested by the UI before any of this runs.
-class BleOtaRepositoryImpl(private val context: Context) : BleOtaRepository {
+class BleOtaRepositoryImpl @Inject constructor(
+    @ApplicationContext private val context: Context,
+) : BleOtaRepository {
 
+    // Android's BluetoothGattCallback is itself callback-based (each method fires independently,
+    // whenever the OS feels like it), but every public function below is `suspend` - so each
+    // event type gets wrapped as one case of this sealed interface and funneled through the
+    // `events` Channel just below, letting `awaitEvent<T>()` turn "wait for the next matching
+    // callback" into an ordinary suspending call site instead of nested callback lambdas.
     private sealed interface GattEvent {
         data class ConnectionStateChanged(val newState: Int, val status: Int) : GattEvent
         data class ServicesDiscovered(val status: Int) : GattEvent
@@ -163,6 +181,12 @@ class BleOtaRepositoryImpl(private val context: Context) : BleOtaRepository {
         }
     }
 
+    // `inline` + `reified T`: normally a generic type parameter is erased at runtime (the JVM
+    // wouldn't know what `T` was, so `event is T` couldn't compile) - marking the function `inline`
+    // makes the compiler paste its body into every call site instead of compiling it once, and
+    // that's specifically what `reified` needs to keep the real type available for the `is T`
+    // check below. This is why callers can write the pleasant `awaitEvent<GattEvent.MtuChanged>()`
+    // instead of passing a `Class<T>` token around by hand.
     private suspend inline fun <reified T : GattEvent> awaitEvent(timeoutMs: Long = 15_000L): T =
         withTimeout(timeoutMs) {
             while (true) {
@@ -223,6 +247,11 @@ class BleOtaRepositoryImpl(private val context: Context) : BleOtaRepository {
         }
     }
 
+    // `callbackFlow {}` bridges an old-style callback API (ScanCallback) into a Flow: `trySend`
+    // inside the callback pushes a value out to whoever is collecting, and `awaitClose {}` is the
+    // required cleanup block that runs when the collector stops (cancelled, or the flow itself
+    // closes) - here, that's where `scanner.stopScan(...)` lives, guaranteeing the BLE radio isn't
+    // left scanning forever just because a caller like `startScan()`'s `.first()` moved on.
     override fun scanForDevice(targetName: String): Flow<BleDeviceInfo> = callbackFlow {
         val scanner = bluetoothManager.adapter?.bluetoothLeScanner
         if (scanner == null) {

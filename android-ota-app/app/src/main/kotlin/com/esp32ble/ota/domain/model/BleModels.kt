@@ -1,12 +1,24 @@
 package com.esp32ble.ota.domain.model
 
-/** A BLE device discovered by scanning, before any GATT connection exists. */
+/**
+ * A Kotlin `data class` auto-generates `equals()`/`hashCode()`/`toString()`/`copy()` from its
+ * constructor properties - the compiler writes the boilerplate a Java POJO would need by hand.
+ * `name` is nullable (`String?`) because not every advertising BLE device includes one.
+ */
 data class BleDeviceInfo(
     val address: String,
     val name: String?,
 )
 
-/** One event emitted while an OTA transfer is running. */
+/**
+ * A `sealed interface` restricts every implementation to this same file (or, since Kotlin 1.5,
+ * anywhere in the same compilation module) - the compiler then *knows* it has seen every possible
+ * subtype, so a `when (event) { ... }` over an `OtaTransferEvent` (see `OtaViewModel.startUpdate`)
+ * needs no `else` branch to be exhaustive. This is Kotlin's answer to "model a fixed set of
+ * cases", the same job an enum does, but here each case can carry different data.
+ * `data object` (new in Kotlin 1.9) is for a singleton case with no payload - like `data class`,
+ * it gets a sensible auto-generated `toString()`, which a plain `object` alone would not.
+ */
 sealed interface OtaTransferEvent {
     data class Progress(val bytesSent: Int, val totalBytes: Int) : OtaTransferEvent
     data object Validating : OtaTransferEvent
@@ -14,6 +26,7 @@ sealed interface OtaTransferEvent {
     data class Failure(val reason: String) : OtaTransferEvent
 }
 
+/** A plain custom exception type - `: Exception(message)` just forwards to the parent constructor. */
 class BleOtaException(message: String) : Exception(message)
 
 /**

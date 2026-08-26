@@ -6,8 +6,16 @@ brightness/blink control of the onboard LED (LED service), and a subscribe-and-g
 simulated heart rate with a switch to stress-test client-side backpressure handling (Heart Rate
 service).
 
-Built with **MVVM + Clean Architecture** and explicit use cases - see [Architecture](#architecture)
-below. Verified end-to-end on real hardware (see [Verified on hardware](#verified-on-hardware)).
+Built with **MVVM + Clean Architecture**, explicit use cases, and **Hilt** for dependency injection
+- see [Architecture](#architecture) below. Verified end-to-end on real hardware (see
+[Verified on hardware](#verified-on-hardware)).
+
+**Comments as learning material:** this codebase is intentionally more heavily commented than
+typical production Kotlin - the comments call out Kotlin language features and idioms as they come
+up (property delegates, sealed interfaces, `Result`, coroutines/Flow, reified generics, Compose's
+`remember`/state hoisting, and so on), for someone learning Kotlin/Android alongside reading the
+code. If you're reading this project for its architecture rather than as a tutorial, feel free to
+skim past them.
 
 ## Screens / flow
 
@@ -60,25 +68,31 @@ data/ble/                        -- Android BLE implementation of the domain int
 │                                 also owns the heart-rate backpressure buffer (see below)
 └── FirmwareSourceImpl.kt          Reads bytes from assets/ or a content:// Uri
 
-di/                               -- hand-rolled DI (no Hilt, see note below)
-├── AppContainer.kt                Builds the repository + use case graph
-└── ViewModelFactory.kt
+di/                               -- Hilt module
+└── RepositoryModule.kt            @Binds BleOtaRepositoryImpl -> BleOtaRepository,
+                                  FirmwareSourceImpl -> FirmwareSource
 
 presentation/ota/                 -- MVVM
 ├── OtaUiState.kt                  One sealed interface = one state per screen above
-├── OtaViewModel.kt                 Talks only to use cases, never to android.bluetooth.*;
-│                                 also holds LED/heart-rate StateFlows alongside uiState
+├── OtaViewModel.kt                 @HiltViewModel; talks only to use cases, never to
+│                                 android.bluetooth.*; also holds LED/heart-rate StateFlows
+│                                 alongside uiState
 └── OtaScreen.kt                   Compose UI, including the LED control section and a
                                   custom Canvas-based heart-rate graph
 
-MainActivity.kt                   -- permission gating, file picker, wires everything together
+MainActivity.kt                   -- @AndroidEntryPoint; permission gating, file picker,
+                                  wires everything together
+BleOtaApplication.kt              -- @HiltAndroidApp entry point
 ```
 
-**Why no Hilt/Koin:** `AppContainer` is a small manual container instead. Every dependency is
-already expressed as an interface (`BleOtaRepository`, `FirmwareSource`), so swapping in a DI
-framework later is a change contained entirely to `di/` - the domain and presentation layers
-wouldn't need to change at all. This was a deliberate simplification to keep the build surface
-small; add Hilt if the project grows.
+**Dependency injection: Hilt.** Every dependency is already expressed as an interface
+(`BleOtaRepository`, `FirmwareSource`), so the DI framework only needs one small module -
+`RepositoryModule` - to bind each interface to its implementation. `BleOtaRepositoryImpl` is
+`@Singleton` (one shared instance for the process lifetime, since it owns the live `BluetoothGatt`
+connection); every `domain/usecase/*` class and `OtaViewModel` itself just declare
+`@Inject constructor(...)` and Hilt wires the rest together automatically. The domain and
+presentation layers don't import anything Hilt-specific beyond that one annotation each - the
+interface boundaries mean the DI framework could be swapped again with no other code changes.
 
 ## GATT protocol: OTA service
 

@@ -84,7 +84,14 @@ Each `components/*_service/` is independent and exposes its own GATT service:
   bytes), Version (read-only version string). Dual-partition OTA (`ota_0`/`ota_1`, no factory
   partition) with `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` for automatic rollback if a new image
   never confirms itself healthy after boot. Reboot is a separate explicit command from END, so a
-  client can see a confirmed-success state before committing to restart.
+  client can see a confirmed-success state before committing to restart. Also runs an **educational**
+  L2CAP CoC (Connection-Oriented Channel) server on a fixed PSM (`OTA_L2CAP_PSM = 0x00F0`),
+  registered once at boot in `ota_l2cap_init()`, as an optional high-throughput alternative to the
+  per-chunk GATT Data writes - see `ble-ota/README.md`'s "Fast-update path" section. Verified
+  working on the firmware side; the Android client (`streamFirmwareViaL2cap` in
+  `BleOtaRepositoryImpl.kt`) is implemented per the public API but failed to connect on the one test
+  phone tried (Redmi/Xiaomi, Android 12) - documented as a likely OEM Bluetooth HAL limitation, not
+  a code bug. GATT remains the default transport.
 - `led_service` - custom service `...1bb0`: one Config characteristic (7-byte: mode, R, G, B,
   brightness, blink_interval_ms). Writes apply to the LED immediately **and** persist to NVS
   (survives reboots/power loss) - this replaced an earlier Kconfig-based approach specifically so
@@ -116,9 +123,23 @@ there is no schema shared between them, just matching hand-written constants on 
 domain/       pure Kotlin - models, repository interfaces, use cases. No android.bluetooth.* here.
 data/ble/     BleOtaRepositoryImpl - the only place touching android.bluetooth.*. One GATT
               operation in flight at a time, enforced via a Mutex (Android BLE requirement).
-di/           hand-rolled DI container (AppContainer + ViewModelFactory) - no framework.
-presentation/ MVVM: OtaViewModel (StateFlow-based) + OtaScreen (Compose, one state per UI step).
+di/           Hilt: RepositoryModule (@Binds impls to their domain interfaces). Every
+              use case and OtaViewModel itself use @Inject constructor; BleOtaRepositoryImpl
+              is @Singleton (owns the one live BluetoothGatt connection for the process).
+              MainActivity is @AndroidEntryPoint, BleOtaApplication is @HiltAndroidApp.
+presentation/ MVVM: OtaViewModel (@HiltViewModel, StateFlow-based) + OtaScreen (Compose, one
+              state per UI step).
 ```
+
+Toolchain note: Hilt 2.60.1 + KSP 2.3.11 build cleanly against this project's Kotlin 2.4.10 (via
+AGP 9.3.2's built-in Kotlin support, not a separate `kotlin-android` plugin) - confirmed via an
+actual `gradle :app:assembleDebug`, not just version-number inspection, since no KSP release
+exactly matching 2.4.10 was published at the time this was pinned.
+
+The whole app is **more heavily commented than typical production Kotlin, on purpose** - comments
+throughout explain Kotlin/Compose/coroutines language features and idioms as they appear, since
+this project doubles as material for learning Kotlin. Keep that density up in new code touched
+here rather than reverting to terse/uncommented style, unless told otherwise.
 
 `OtaUiState` is a sealed interface with one variant per screen/step (Idle, Scanning, Connected,
 Updating, etc.) - the Composable is a `when` over this, not a single mutable form.

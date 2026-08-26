@@ -4,6 +4,14 @@ import com.esp32ble.ota.domain.model.BleDeviceInfo
 
 data class FirmwareInfo(val label: String, val sizeBytes: Int, val version: String?)
 
+/**
+ * The screen's entire state as one sealed hierarchy - at any moment the UI is in *exactly one* of
+ * these cases, never some inconsistent mix (e.g. "updating" while also "not yet connected"). The
+ * ViewModel holds a `StateFlow<OtaUiState>` and Compose (`OtaScreen`) does a `when` over it to
+ * decide what to draw; because it's `sealed`, that `when` is exhaustive and adding a new case here
+ * forces every place that reacts to state to consciously handle it - the compiler won't let a spot
+ * silently forget.
+ */
 sealed interface OtaUiState {
     data object Idle : OtaUiState
     data object Scanning : OtaUiState

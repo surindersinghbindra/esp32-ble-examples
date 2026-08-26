@@ -20,6 +20,7 @@ import com.esp32ble.ota.domain.usecase.RebootDeviceUseCase
 import com.esp32ble.ota.domain.usecase.ScanForEspDeviceUseCase
 import com.esp32ble.ota.domain.usecase.SetHeartRateFastModeUseCase
 import com.esp32ble.ota.domain.usecase.WriteLedConfigUseCase
+import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -31,8 +32,24 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import javax.inject.Inject
 
-class OtaViewModel(
+/**
+ * `@HiltViewModel` + `@Inject constructor` is the ViewModel equivalent of the `@Inject
+ * constructor` pattern used throughout the `domain/usecase/` classes: it tells Hilt this class
+ * can be built automatically, this time specifically wired into Android's `ViewModelProvider`
+ * machinery. That's what lets `MainActivity` obtain this instance with the plain
+ * `by viewModels()` delegate (no factory class to write or pass in by hand) as long as the
+ * Activity itself is annotated `@AndroidEntryPoint` - see `MainActivity.kt`.
+ *
+ * Every constructor parameter here is a use case from `domain/usecase/` - this ViewModel never
+ * imports `android.bluetooth.*` or talks to `BleOtaRepositoryImpl` directly, only to these
+ * narrow, single-purpose classes. That's the actual point of the use-case layer: this
+ * constructor signature alone tells you everything this screen can *do*, without reading a
+ * single line of its body.
+ */
+@HiltViewModel
+class OtaViewModel @Inject constructor(
     private val scanForEspDevice: ScanForEspDeviceUseCase,
     private val connectToDevice: ConnectToDeviceUseCase,
     private val disconnectDevice: DisconnectDeviceUseCase,
@@ -80,9 +97,17 @@ class OtaViewModel(
     private var heartRateCollectJob: Job? = null
     private var heartRateSampleJob: Job? = null
 
+    // `viewModelScope` is a CoroutineScope tied to this ViewModel's lifetime - Android cancels it
+    // automatically when the ViewModel is cleared (e.g. the screen is finished for good), so a
+    // coroutine launched here never needs manual cleanup the way a raw Thread would.
     fun startScan() {
         viewModelScope.launch {
             _uiState.value = OtaUiState.Scanning
+            // `scanForEspDevice()` returns a cold Flow of every matching device seen; `.first()`
+            // suspends until exactly one value arrives, then cancels the underlying scan for us.
+            // `withTimeoutOrNull` wraps that suspension with a deadline: past 15s it cancels the
+            // coroutine and yields `null` instead of throwing, which is why `found` is nullable
+            // even though `.first()` alone would either return a value or throw.
             val found = withTimeoutOrNull(15_000) {
                 scanForEspDevice().first()
             }
@@ -97,13 +122,25 @@ class OtaViewModel(
     fun connect(device: BleDeviceInfo) {
         viewModelScope.launch {
             _uiState.value = OtaUiState.Connecting(device)
+            // `Result<T>` is Kotlin's standard type for "either a success value or a caught
+            // exception", returned rather than thrown - `.onSuccess {}` / `.onFailure {}` run their
+            // lambda only in the matching case and otherwise pass `this` through unchanged, so they
+            // chain the way `.let`/`.also` do.
             connectToDevice(device)
                 .onSuccess { mtu ->
                     currentDevice = device
                     _uiState.value = OtaUiState.Connected(device, mtu, firmware = null, deviceVersion = null)
                     // Best-effort: if either of these fails, that section of the UI just stays blank.
                     readDeviceVersion().onSuccess { version ->
+                        // `as?` is a *safe cast*: it yields the value typed as `Connected` if the
+                        // state truly is that subtype, or null otherwise (rather than throwing a
+                        // ClassCastException) - `?: return@onSuccess` then bails out of just this
+                        // lambda if, by the time this suspend call resolved, the user had already
+                        // disconnected and the state moved on to something else.
                         val connected = _uiState.value as? OtaUiState.Connected ?: return@onSuccess
+                        // `.copy(...)` (free on every `data class`) returns a new instance with only
+                        // the named field changed - `OtaUiState.Connected` itself is otherwise
+                        // immutable (all `val`s), which is what makes it safe to hand out to Compose.
                         _uiState.value = connected.copy(deviceVersion = version)
                     }
                     readLedConfig().onSuccess { config -> _ledConfig.value = config }
@@ -214,6 +251,10 @@ class OtaViewModel(
         _heartRateSubscribed.value = true
         _heartRateHistory.value = emptyList()
 
+        // Two independent coroutines, each doing one job, rather than one coroutine trying to do
+        // both: this one just drains whatever BLE notifications arrive, as fast as they arrive,
+        // into `_currentBpm`. `.catch {}` on a Flow only intercepts *upstream* exceptions (from
+        // `observeHeartRate()` itself) - it can't catch anything thrown later in `.collect {}`.
         heartRateCollectJob = viewModelScope.launch {
             observeHeartRate()
                 .catch { _heartRateSubscribed.value = false }
@@ -224,9 +265,20 @@ class OtaViewModel(
         // actually notifying - this is the client-side half of the backpressure story (the
         // other half, dropping old samples under load, lives in BleOtaRepositoryImpl).
         heartRateSampleJob = viewModelScope.launch {
+            // `isActive` is true until this coroutine's Job is cancelled (by `stopHeartRate()`
+            // below) - checking it is what makes this loop a well-behaved *cooperative* cancellation
+            // point instead of a `while (true)` that would keep sampling forever after unsubscribe.
             while (isActive) {
                 delay(200)
+                // `_currentBpm.value?.let { bpm -> ... }` only runs the block when the value isn't
+                // null (before the first BLE sample has ever arrived, it's still the initial null).
                 _currentBpm.value?.let { bpm ->
+                    // `StateFlow.update {}` atomically replaces the value with the result of the
+                    // lambda applied to the current one - the safe way to do a "read old, compute
+                    // new" update when multiple coroutines could otherwise race on a plain
+                    // `.value = ...` assignment. `(it + bpm).takeLast(50)` appends one sample and
+                    // caps the list at 50 entries, so the graph's data (and memory use) can't grow
+                    // without bound over a long-running subscription.
                     _heartRateHistory.update { (it + bpm).takeLast(50) }
                 }
             }

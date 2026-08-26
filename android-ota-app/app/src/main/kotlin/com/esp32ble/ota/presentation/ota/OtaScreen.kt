@@ -39,6 +39,15 @@ import com.esp32ble.ota.domain.model.LedConfig
 import com.esp32ble.ota.domain.model.LedMode
 import com.esp32ble.ota.domain.model.OtaTransport
 
+/**
+ * The top-level screen. It takes no ViewModel reference at all - every piece of state it needs
+ * arrives as a plain parameter, and every user action is a callback lambda passed in from
+ * `MainActivity`. This is "stateless" or "hoisted-state" Compose UI: it makes the screen trivially
+ * previewable/testable (just call it with fake values, no Android framework or BLE stack needed)
+ * and keeps all the actual logic in one place (`OtaViewModel`) instead of scattered across
+ * Composables. The `when (state)` below is exhaustive with no `else` because `OtaUiState` is
+ * `sealed` - see its KDoc in `OtaUiState.kt`.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun OtaScreen(
@@ -220,10 +229,18 @@ private fun LedControlSection(
     }
 
     Text("Brightness: ${config.brightness}")
+    // `remember(config.brightness) { ... }` - the key in parentheses - re-runs the initializer
+    // and resets `brightnessPos` whenever `config.brightness` itself changes (e.g. the firmware's
+    // NVS-persisted value comes back after connecting), but otherwise keeps this local slider
+    // position stable across recompositions while the user is actively dragging it. Without a key,
+    // `remember` would only ever run its initializer once, ignoring later config updates entirely.
     var brightnessPos by remember(config.brightness) { mutableStateOf(config.brightness.toFloat()) }
     Slider(
         value = brightnessPos,
+        // Every drag frame updates the local slider position for smooth visual feedback...
         onValueChange = { brightnessPos = it },
+        // ...but the BLE write (and its LedConfig round-trip) only fires once, when the user lets
+        // go - writing on every `onValueChange` frame would flood the connection with GATT writes.
         onValueChangeFinished = { onSetBrightness(brightnessPos.toInt()) },
         valueRange = 0f..255f,
     )
@@ -275,6 +292,12 @@ private fun HeartRateSection(
     }
 }
 
+/**
+ * Hand-drawn line chart - no charting library, just Compose's low-level `Canvas` + `Path` drawing
+ * API. The lambda passed to `Canvas` runs inside a `DrawScope` receiver, which is *why* `size`,
+ * `drawPath`, etc. below are callable with no receiver written out (an "implicit receiver", the
+ * same mechanism that lets `apply {}`/`with {}` blocks reference the receiver's members bare).
+ */
 @Composable
 private fun HeartRateGraph(history: List<Int>) {
     val lineColor = Color(0xFFE53935)
@@ -283,6 +306,9 @@ private fun HeartRateGraph(history: List<Int>) {
             .fillMaxWidth()
             .height(140.dp),
     ) {
+        // `return@Canvas` is a *labeled return*: inside a lambda, plain `return` isn't allowed (it
+        // would try to return from the enclosing function), so Kotlin lets you return from the
+        // lambda itself using the implicit label matching the function name it was passed to.
         if (history.size < 2) return@Canvas
         val minBpm = 50f
         val maxBpm = 170f
