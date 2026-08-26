@@ -5,10 +5,14 @@
  *
  *   Control (read / write / notify) - single-byte commands in, single-byte
  *   status notifications out:
- *     write 0x01 (START) -> begin an OTA update into the inactive OTA slot
- *     write 0x02 (END)   -> finalize + validate the image, then reboot into it
- *     write 0x03 (ABORT) -> cancel an in-progress update
+ *     write 0x01 (START)  -> begin an OTA update into the inactive OTA slot
+ *     write 0x02 (END)    -> finalize + validate the image (does NOT reboot)
+ *     write 0x03 (ABORT)  -> cancel an in-progress update
+ *     write 0x04 (REBOOT) -> reboot now, into whichever partition is set to boot
  *     notify 0x00 IDLE, 0x01 IN_PROGRESS, 0x02 SUCCESS, 0x03 ERROR
+ *
+ *   Rebooting is a separate, explicit step so a client can confirm the new
+ *   image validated successfully before choosing to restart into it.
  *
  *   Data (write without response) - raw firmware bytes, sent in-order in
  *   as many chunks as the negotiated ATT MTU allows. Only accepted while a
@@ -47,9 +51,10 @@ static const ble_uuid128_t ota_chr_data_uuid =
     BLE_UUID128_INIT(0xa2, 0x1b, 0x2c, 0x3d, 0x4e, 0x5f, 0x6a, 0x7b,
                       0x8c, 0x9d, 0xae, 0xbf, 0xc0, 0xd1, 0xe2, 0xf3);
 
-#define OTA_CMD_START 0x01
-#define OTA_CMD_END   0x02
-#define OTA_CMD_ABORT 0x03
+#define OTA_CMD_START  0x01
+#define OTA_CMD_END    0x02
+#define OTA_CMD_ABORT  0x03
+#define OTA_CMD_REBOOT 0x04
 
 #define OTA_STATUS_IDLE        0x00
 #define OTA_STATUS_IN_PROGRESS 0x01
@@ -201,18 +206,27 @@ ota_control_access_cb(uint16_t conn_handle, uint16_t attr_handle,
             break;
         }
 
-        ESP_LOGI(TAG, "New image valid (%u bytes) - rebooting into it",
+        ESP_LOGI(TAG, "New image valid (%u bytes) - boot partition switched, "
+                 "waiting for an explicit REBOOT command",
                  (unsigned) s_ota_bytes_written);
         send_status(OTA_STATUS_SUCCESS);
-        /* Give the BLE stack a moment to actually get the notification out
-         * over the air before we reset. */
-        esp_timer_start_once(s_reboot_timer, 500 * 1000);
         break;
     }
 
     case OTA_CMD_ABORT:
         ota_abort_if_in_progress("client requested abort");
         send_status(OTA_STATUS_IDLE);
+        break;
+
+    case OTA_CMD_REBOOT:
+        if (s_ota_state == OTA_STATE_IN_PROGRESS) {
+            ESP_LOGW(TAG, "REBOOT ignored: OTA still in progress (send END or ABORT first)");
+            break;
+        }
+        ESP_LOGI(TAG, "Reboot requested - restarting in 500ms");
+        /* Give the BLE stack a moment to actually get the write response /
+         * any pending notification out over the air before we reset. */
+        esp_timer_start_once(s_reboot_timer, 500 * 1000);
         break;
 
     default:

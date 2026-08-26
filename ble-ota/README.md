@@ -8,10 +8,11 @@ ESP-IDF's standard **ota_0 / ota_1** dual-partition scheme - no factory partitio
 slot the board is *not* currently running from is always the update target, so a bad or
 interrupted transfer can never overwrite the only bootable image.
 
-This has been tested end-to-end on real hardware: BLE central (a Python script using
-[`bleak`](https://github.com/hbldh/bleak)) streams a `.bin` into the inactive slot, the board
-validates it, switches its boot partition, reboots, and confirms the new image is healthy before
-making the switch permanent.
+This has been tested end-to-end on real hardware: a BLE central (a Python script using
+[`bleak`](https://github.com/hbldh/bleak), or the companion Android app) streams a `.bin` into the
+inactive slot, the board validates it and switches its boot partition, the client explicitly
+triggers a reboot, and the board confirms the new image is healthy before making the switch
+permanent.
 
 ## How it works
 
@@ -22,9 +23,14 @@ BLE Central (phone / PC)                    ESP32-C6
       |  write DATA (firmware bytes) ------>  esp_ota_write(), repeated
       |  ...                                  for every chunk
       |  write CONTROL = END --------------->  esp_ota_end() validates the image
-      |                                       (magic byte + SHA-256)
-      |  <----------- notify SUCCESS/ERROR    esp_ota_set_boot_partition()
-      |                                       (only on success), then reboot
+      |                                       (magic byte + SHA-256), then
+      |                                       esp_ota_set_boot_partition()
+      |                                       (only on success) - no reboot yet
+      |  <----------- notify SUCCESS/ERROR
+      |
+      |  write CONTROL = REBOOT ------------>  esp_restart() (separate, explicit
+      |                                       step, so a client can confirm
+      |                                       SUCCESS before committing to it)
       |                                             |
       |                                             v
       |                                       new image boots in
@@ -50,8 +56,9 @@ Custom service `f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1ba0` with two characteristics:
 | Byte | Command |
 |---|---|
 | `0x01` | START - begin an OTA update into the inactive slot |
-| `0x02` | END - finalize, validate, and reboot into the new image |
+| `0x02` | END - finalize and validate the image (does **not** reboot) |
 | `0x03` | ABORT - cancel an in-progress update |
+| `0x04` | REBOOT - restart now, into whichever partition is set to boot |
 
 **Control notifications** (subscribe to receive status):
 
@@ -150,10 +157,16 @@ pip install bleak
 python tools/ota_client.py build/ble_ota.bin
 ```
 
-The script scans for `esp32-ble-ota`, streams `build/ble_ota.bin` into the inactive OTA slot, and
-reports SUCCESS or ERROR. On success the board reboots into the new image automatically - if
-you still have a serial monitor attached, you'll see it boot from the other partition and log the
-self-check/rollback-confirmation described above.
+The script scans for `esp32-ble-ota`, streams `build/ble_ota.bin` into the inactive OTA slot,
+reports SUCCESS or ERROR, and - only on success - sends REBOOT. If you still have a serial monitor
+attached, you'll see it boot from the other partition and log the self-check/rollback-confirmation
+described above.
+
+## Companion Android app
+
+[`../android-ota-app/`](../android-ota-app/) is a Jetpack Compose app that does the same thing
+with a UI: scan, connect, pick a firmware file (or use the one bundled in its assets), push it
+with a live progress bar, and tap a button to reboot once it reports success.
 
 ## Project Structure
 

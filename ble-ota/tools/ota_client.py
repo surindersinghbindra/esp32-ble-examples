@@ -22,6 +22,7 @@ DATA_UUID = "f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1ba2"
 CMD_START = bytes([0x01])
 CMD_END = bytes([0x02])
 CMD_ABORT = bytes([0x03])
+CMD_REBOOT = bytes([0x04])
 
 STATUS_NAMES = {0x00: "IDLE", 0x01: "IN_PROGRESS", 0x02: "SUCCESS", 0x03: "ERROR"}
 
@@ -93,10 +94,14 @@ async def main():
             print("Timed out waiting for END result (device may already be rebooting)")
             return
 
-        if last_status["value"] == 0x02:
-            print("OTA SUCCESS - device is validating and rebooting into the new image")
-        else:
+        if last_status["value"] != 0x02:
             print("OTA FAILED - device kept running its current firmware")
+            return
+
+        print("OTA SUCCESS - new image validated, boot partition switched")
+        print("Sending REBOOT...")
+        await client.write_gatt_char(CONTROL_UUID, CMD_REBOOT, response=True)
+        print("Device is rebooting into the new image")
 
 
 if __name__ == "__main__":
