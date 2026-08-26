@@ -69,6 +69,11 @@ class MainActivity : ComponentActivity() {
                     PermissionGateScreen { permissionLauncher.launch(requiredPermissions) }
                 } else {
                     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+                    val ledConfig by viewModel.ledConfig.collectAsStateWithLifecycle()
+                    val heartRateSubscribed by viewModel.heartRateSubscribed.collectAsStateWithLifecycle()
+                    val heartRateFastMode by viewModel.heartRateFastMode.collectAsStateWithLifecycle()
+                    val currentBpm by viewModel.currentBpm.collectAsStateWithLifecycle()
+                    val heartRateHistory by viewModel.heartRateHistory.collectAsStateWithLifecycle()
                     OtaScreen(
                         state = uiState,
                         onScan = viewModel::startScan,
@@ -79,6 +84,17 @@ class MainActivity : ComponentActivity() {
                         onReboot = viewModel::reboot,
                         onDisconnect = viewModel::disconnect,
                         onBackToStart = viewModel::backToStart,
+                        ledConfig = ledConfig,
+                        onSetLedMode = viewModel::setLedMode,
+                        onSetLedColor = viewModel::setLedColor,
+                        onSetLedBrightness = viewModel::setLedBrightness,
+                        onSetLedBlinkIntervalMs = viewModel::setLedBlinkIntervalMs,
+                        heartRateSubscribed = heartRateSubscribed,
+                        heartRateFastMode = heartRateFastMode,
+                        currentBpm = currentBpm,
+                        heartRateHistory = heartRateHistory,
+                        onToggleHeartRate = viewModel::toggleHeartRateSubscription,
+                        onSetHeartRateFastMode = viewModel::setHeartRateFastMode,
                     )
                 }
             }

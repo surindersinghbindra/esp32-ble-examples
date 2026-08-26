@@ -18,6 +18,10 @@ class ViewModelFactory(private val container: AppContainer) : ViewModelProvider.
                 loadFirmwareFromUri = container.loadFirmwareFromUri,
                 readDeviceVersion = container.readDeviceVersion,
                 extractFirmwareVersion = container.extractFirmwareVersion,
+                readLedConfig = container.readLedConfig,
+                writeLedConfig = container.writeLedConfig,
+                observeHeartRate = container.observeHeartRate,
+                setHeartRateFastModeUseCase = container.setHeartRateFastMode,
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: $modelClass")

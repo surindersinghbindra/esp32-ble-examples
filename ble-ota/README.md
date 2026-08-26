@@ -14,12 +14,29 @@ inactive slot, the board validates it and switches its boot partition, the clien
 triggers a reboot, and the board confirms the new image is healthy before making the switch
 permanent.
 
-The firmware also drives the onboard addressable LED solid red - purely as a visible "yes, the new
-image is really running" marker, unrelated to the OTA logic itself. It's set from its own FreeRTOS
-task (`led_init_task` in `main.c`) rather than inline as the first line of `app_main()`: calling
-the RMT-based LED driver that early was unreliable in testing (the strip silently kept showing a
-stale color from a previous flash instead of the one just requested); deferring it to a task that
-runs once the rest of system init gets going fixed it.
+Besides the core OTA mechanism, this firmware also carries two more GATT services, mostly as a
+learning ground for other BLE patterns - **live, persisted control of the onboard LED**, and a
+**standard Heart Rate service with a simulated BPM value**, used to demonstrate client-side
+backpressure. See [Modular architecture](#modular-architecture) and the protocol sections below.
+
+## Modular architecture
+
+Each GATT service is its own self-contained ESP-IDF **component**, not just a file inside `main/`:
+
+```
+ble-ota/
+├── main/main.c                        -- brings up the BLE stack, wires the 3 services together,
+│                                          and owns the boot-time OTA rollback confirmation
+└── components/
+    ├── ota_service/                   -- push a new firmware image over BLE (see below)
+    ├── led_service/                    -- live LED color/mode/brightness/blink, persisted to NVS
+    └── heart_rate_service/              -- standard Bluetooth Heart Rate service + simulator
+```
+
+`main.c` calls each service's own `..._init()` once (after `ble_svc_gap_init()` /
+`ble_svc_gatt_init()`, which must only happen once, globally) and fans out GAP connect/disconnect/
+subscribe events to whichever services care about them. Each component is otherwise independent -
+you could delete `heart_rate_service/` entirely and the OTA/LED functionality wouldn't notice.
 
 ## How it works
 
@@ -49,7 +66,7 @@ BLE Central (phone / PC)                    ESP32-C6
       |                                       cancel_rollback()
 ```
 
-## GATT protocol
+## GATT protocol: OTA service (`components/ota_service/`)
 
 Custom service `f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1ba0` with three characteristics:
 
@@ -101,7 +118,7 @@ Custom service `f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1ba0` with three characteristics
    actually prevents a bad OTA update from bricking the board, and it's the main reason to prefer
    this over a factory-only or single-partition layout.
 
-4. **Disconnects abort cleanly.** If the BLE link drops mid-transfer, `gatt_svr_ota_on_disconnect()`
+4. **Disconnects abort cleanly.** If the BLE link drops mid-transfer, `ota_service_on_disconnect()`
    calls `esp_ota_abort()` so the OTA handle isn't left open and the target partition isn't left in
    a half-written state for a future update to trip over.
 
@@ -127,31 +144,47 @@ Custom service `f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1ba0` with three characteristics
   few minutes. A faster client could use write-without-response with real credit-based flow
   control, but that's more complex than this example needs.
 
-## LED configuration
+## GATT protocol: LED service (`components/led_service/`)
 
-`idf.py menuconfig` -> **BLE OTA Example Configuration** -> **Status LED mode** (backed by
-`main/Kconfig.projbuild`):
+Custom service `f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1bb0` with one characteristic:
 
-| Mode | Behavior |
-|---|---|
-| Only Red (default) | Steady red, always on |
-| Only Green | Steady green, always on |
-| Rotate | Cycles Red -> Green -> Blue -> Off, repeating, `n` seconds per phase |
+| Characteristic | UUID | Properties | Purpose |
+|---|---|---|---|
+| Config | `...bb1` | read, write | Get/set color, mode, brightness, blink timing |
 
-**Seconds between LED rotation phases** (`CONFIG_LED_ROTATE_DELAY_SECONDS`, default 4, range 1-60)
-only applies in Rotate mode - the solid modes just stay lit. This is purely cosmetic (which build
-is visibly running); it has nothing to do with the OTA transfer itself.
+This is **live, runtime configuration** - not the old Kconfig-based approach (that's gone; see the
+git history if you want to compare). A write is applied to the LED immediately *and* saved to NVS
+(flash storage that survives power loss and reboots), so whatever was last set is restored
+automatically next boot - no rebuild or reflash needed to change how the LED behaves, unlike
+everything else about updating this board.
 
-To build a one-off variant without changing the checked-in default, edit the generated `sdkconfig`
-directly (this is exactly what `menuconfig` does under the hood) and rebuild:
+Wire format, 7 bytes, same layout whether reading or writing:
 
-```bash
-idf.py menuconfig   # interactively, under BLE OTA Example Configuration
-# or, non-interactively:
-sed -i '' 's/^CONFIG_LED_MODE_ONLY_RED=y/# CONFIG_LED_MODE_ONLY_RED is not set/' sdkconfig
-sed -i '' 's/^# CONFIG_LED_MODE_ROTATE is not set/CONFIG_LED_MODE_ROTATE=y/' sdkconfig
-idf.py build
-```
+| Byte(s) | Field | Values |
+|---|---|---|
+| 0 | mode | `0` off, `1` solid, `2` blink |
+| 1-3 | red, green, blue | `0-255` each |
+| 4 | brightness | `0-255` - scales red/green/blue down before display |
+| 5-6 | blink_interval_ms | uint16, little-endian; only used in blink mode |
+
+## GATT protocol: Heart Rate service (`components/heart_rate_service/`)
+
+Uses the **standard Bluetooth SIG Heart Rate Service** (not a custom one), so any generic BLE
+viewer app (nRF Connect, etc.) recognizes it correctly - plus one custom characteristic that isn't
+part of the standard:
+
+| Characteristic | UUID | Properties | Purpose |
+|---|---|---|---|
+| Heart Rate Measurement | `0x2A37` (standard) | notify | Flags byte (`0x06`) + 1 byte BPM |
+| Body Sensor Location | `0x2A38` (standard) | read | Fixed `0x01` (Chest) |
+| Rate Control | `f3e2d1c0-...-1bc0` (custom) | write | `0` = normal ~1/s, `1` = fast ~20/s |
+
+The BPM value is simulated - a small random walk around 55-160, updated and notified at whichever
+rate the Rate Control characteristic last selected. Real heart rate hardware only ever notifies at
+~1/s and never needs backpressure handling; the fast mode exists purely so a client has something
+to actually stress-test its backpressure handling against. See the companion Android app's README
+for how it handles that on the receiving end - a bounded drop-oldest buffer plus a UI redraw rate
+decoupled from the BLE notify rate.
 
 ## Firmware version check
 
@@ -274,9 +307,10 @@ above.
 
 ## Companion Android app
 
-[`../android-ota-app/`](../android-ota-app/) is a Jetpack Compose app that does the same thing
-with a UI: scan, connect, pick a firmware file (or use the one bundled in its assets), push it
-with a live progress bar, and tap a button to reboot once it reports success.
+[`../android-ota-app/`](../android-ota-app/) is a Jetpack Compose app that talks to all three
+services: scan/connect/push firmware with a live progress bar and a reboot button (OTA), color
+presets/mode/brightness/blink controls (LED), and a subscribe toggle with a live scrolling BPM
+graph plus a fast-mode switch to see backpressure handling in action (Heart Rate).
 
 ## Project Structure
 
@@ -285,14 +319,25 @@ ble-ota/
 ├── CMakeLists.txt
 ├── sdkconfig.defaults           # BLE stack, ota_0/ota_1 partition table, rollback enable
 ├── sdkconfig.defaults.esp32c6
-├── dependencies.lock             # Locked component-manager dependency versions (commit this)
+├── dependencies.lock            # Locked component-manager dependency versions (commit this)
 ├── main/
 │   ├── CMakeLists.txt
-│   ├── idf_component.yml         # Declares the espressif/led_strip dependency (status LED)
-│   ├── Kconfig.projbuild         # Status LED mode + rotation delay (idf.py menuconfig)
-│   ├── main.c                    # BLE/NimBLE plumbing + boot-time rollback confirmation + status LED
-│   ├── gatt_svr.h
-│   └── gatt_svr.c                # OTA GATT service: control/data/version characteristics, esp_ota_* calls
+│   └── main.c                   # BLE/NimBLE plumbing + wires up the 3 services below +
+│                                 # boot-time OTA rollback confirmation
+├── components/
+│   ├── ota_service/
+│   │   ├── CMakeLists.txt
+│   │   ├── include/ota_service.h
+│   │   └── ota_service.c         # Control/Data/Version characteristics, esp_ota_* calls
+│   ├── led_service/
+│   │   ├── CMakeLists.txt
+│   │   ├── idf_component.yml     # Declares the espressif/led_strip dependency
+│   │   ├── include/led_service.h
+│   │   └── led_service.c         # Config characteristic, NVS persistence, LED driving task
+│   └── heart_rate_service/
+│       ├── CMakeLists.txt
+│       ├── include/heart_rate_service.h
+│       └── heart_rate_service.c  # Standard Heart Rate service + BPM simulator task
 └── tools/
     └── ota_client.py             # Reference BLE OTA client (bleak-based)
 ```

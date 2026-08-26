@@ -1,8 +1,10 @@
 # ESP32 BLE OTA - Android Companion App
 
-A Jetpack Compose app that pushes firmware to the [`ble-ota`](../ble-ota/) ESP32-C6 example over
-Bluetooth Low Energy: scan, connect, pick a firmware image, watch a live progress bar, and reboot
-the board once it confirms the update succeeded.
+A Jetpack Compose app for the [`ble-ota`](../ble-ota/) ESP32-C6 example's three GATT services:
+push firmware over Bluetooth with a live progress bar and reboot button (OTA), live color/
+brightness/blink control of the onboard LED (LED service), and a subscribe-and-graph view of a
+simulated heart rate with a switch to stress-test client-side backpressure handling (Heart Rate
+service).
 
 Built with **MVVM + Clean Architecture** and explicit use cases - see [Architecture](#architecture)
 below. Verified end-to-end on real hardware (see [Verified on hardware](#verified-on-hardware)).
@@ -27,20 +29,35 @@ Each step is its own UI state, driven by a single `OtaViewModel`:
 9. **Failed** - reason shown, "Retry" (device stays connected, so this just re-sends without
    rescanning) or "Disconnect"
 
+Two more sections appear underneath the OTA controls the whole time you're **Connected** (they're
+independent of whatever OTA state you're in):
+
+- **LED Control** - color presets (Red/Green/Blue/Yellow), a Off/Solid/Blink mode switch, a
+  brightness slider, and (in Blink mode) a blink-interval slider. Every change writes the full
+  7-byte config to the device immediately - see [GATT protocol: LED](#gatt-protocol-led-service).
+- **Heart Rate** - a Subscribe/Unsubscribe toggle, current BPM, a live scrolling line graph, and a
+  "Fast mode" switch that asks the board to notify at ~20/s instead of ~1/s specifically so you can
+  watch the backpressure handling do something - see
+  [GATT protocol: Heart Rate](#gatt-protocol-heart-rate-service--backpressure).
+
 ## Architecture
 
 ```
 domain/                          -- pure Kotlin, no Android imports
-├── model/        BleDeviceInfo, OtaTransferEvent, BleOtaException, FirmwareVersionReader
+├── model/        BleDeviceInfo, OtaTransferEvent, BleOtaException, FirmwareVersionReader,
+│                 LedConfig, LedMode, HeartRateSample
 ├── repository/    BleOtaRepository, FirmwareSource   (interfaces only)
 └── usecase/       ScanForEspDeviceUseCase, ConnectToDeviceUseCase, ReadDeviceVersionUseCase,
                     PerformOtaUpdateUseCase, RebootDeviceUseCase,
                     LoadFirmwareFromAssetsUseCase, LoadFirmwareFromUriUseCase,
-                    ExtractFirmwareVersionUseCase, ...
+                    ExtractFirmwareVersionUseCase, ReadLedConfigUseCase, WriteLedConfigUseCase,
+                    ObserveHeartRateUseCase, SetHeartRateFastModeUseCase, ...
 
 data/ble/                        -- Android BLE implementation of the domain interfaces
-├── BleConstants.kt               GATT UUIDs/commands - must match ble-ota/main/gatt_svr.c
-├── BleOtaRepositoryImpl.kt        BluetoothGatt plumbing, one GATT op at a time via a Mutex
+├── BleConstants.kt               GATT UUIDs/commands for all 3 services - must match the
+│                                 corresponding ble-ota/components/*/*.c files
+├── BleOtaRepositoryImpl.kt        BluetoothGatt plumbing, one GATT op at a time via a Mutex;
+│                                 also owns the heart-rate backpressure buffer (see below)
 └── FirmwareSourceImpl.kt          Reads bytes from assets/ or a content:// Uri
 
 di/                               -- hand-rolled DI (no Hilt, see note below)
@@ -49,8 +66,10 @@ di/                               -- hand-rolled DI (no Hilt, see note below)
 
 presentation/ota/                 -- MVVM
 ├── OtaUiState.kt                  One sealed interface = one state per screen above
-├── OtaViewModel.kt                 Talks only to use cases, never to android.bluetooth.*
-└── OtaScreen.kt                   Compose UI, purely a function of OtaUiState
+├── OtaViewModel.kt                 Talks only to use cases, never to android.bluetooth.*;
+│                                 also holds LED/heart-rate StateFlows alongside uiState
+└── OtaScreen.kt                   Compose UI, including the LED control section and a
+                                  custom Canvas-based heart-rate graph
 
 MainActivity.kt                   -- permission gating, file picker, wires everything together
 ```
@@ -61,13 +80,13 @@ framework later is a change contained entirely to `di/` - the domain and present
 wouldn't need to change at all. This was a deliberate simplification to keep the build surface
 small; add Hilt if the project grows.
 
-## GATT protocol
+## GATT protocol: OTA service
 
 Implements the client side of the protocol documented in
-[`../ble-ota/README.md`](../ble-ota/README.md#gatt-protocol) - custom service
-`f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1ba0`, control characteristic for START/END/ABORT/REBOOT commands
-and status notifications, data characteristic for firmware bytes, and a read-only version
-characteristic.
+[`../ble-ota/README.md`](../ble-ota/README.md#gatt-protocol-ota-service-componentsota_service) -
+custom service `f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1ba0`, control characteristic for
+START/END/ABORT/REBOOT commands and status notifications, data characteristic for firmware bytes,
+and a read-only version characteristic.
 
 One thing worth calling out: **the data chunk size is capped at 512 bytes** regardless of the
 negotiated ATT MTU (`BleOtaRepositoryImpl.kt`, `performOtaUpdate`), because the firmware's data
@@ -81,6 +100,45 @@ characteristic; once a firmware image is loaded, `ExtractFirmwareVersionUseCase`
 `FirmwareVersionReader`, which must stay in sync with `ble-ota/tools/ota_client.py`'s
 `read_bin_version()`). If both match, the Connected screen shows a warning but **Start Update stays
 enabled** - this is a warning, not a hard gate, matching the Python client's behavior.
+
+## GATT protocol: LED service
+
+Reads and writes the 7-byte config blob described in
+[`../ble-ota/README.md`](../ble-ota/README.md#gatt-protocol-led-service-componentsled_service) -
+`LedConfig.toWireBytes()` / `LedConfig.fromWireBytes()` handle the packing. On connect,
+`ReadLedConfigUseCase` reads the current config once so the UI starts in sync with whatever the
+board actually has (which may not be factory defaults, since it's persisted in NVS across
+reboots); every button/slider change after that calls `WriteLedConfigUseCase` with a full updated
+config (the whole 7 bytes are always sent together, never a partial update).
+
+The brightness and blink-interval sliders use Compose's `onValueChangeFinished` rather than
+`onValueChange` to trigger the actual BLE write - the slider drags locally at full frame rate for
+a responsive feel, but only one write goes out when you let go, instead of one write per pixel of
+drag.
+
+## GATT protocol: Heart Rate service + backpressure
+
+Subscribes to the standard Heart Rate Measurement characteristic (`0x2A37`) and writes the custom
+Rate Control characteristic to flip between the board's ~1/s and ~20/s simulator modes - see
+[`../ble-ota/README.md`](../ble-ota/README.md#gatt-protocol-heart-rate-service-componentsheart_rate_service)
+for the device side.
+
+This is the one place in the app that has to handle data arriving *faster than it's consumed*,
+and it's handled in two layers:
+
+1. **`BleOtaRepositoryImpl`** feeds every incoming notification into a `MutableSharedFlow` with a
+   bounded extra buffer (64) and `BufferOverflow.DROP_OLDEST`. If nothing is collecting fast enough,
+   old samples are silently dropped rather than piling up in memory or blocking the BLE callback
+   thread - this is the actual backpressure mechanism.
+2. **`OtaViewModel`** doesn't update the graph on every single sample either, even though the flow
+   above hands them out as fast as they arrive. It keeps a `@Volatile`-equivalent "latest BPM"
+   value updated cheaply on every notification, and a *separate* coroutine ticks every 200ms to
+   sample that value into the graph's history list. So the graph redraws at a fixed ~5fps
+   regardless of whether the board is notifying at 1/s or 20/s - the UI's redraw rate is fully
+   decoupled from the arrival rate.
+
+Together, these mean flipping "Fast mode" on doesn't cause growing memory use, dropped frames, or a
+frozen UI - which is exactly what was confirmed on real hardware (see below).
 
 ## Verified on hardware
 
@@ -103,6 +161,14 @@ Redmi/Xiaomi Android 12 phone connected via `adb`:
   (same version, since the asset had just been re-synced) correctly triggered the "device already
   reports this exact version" warning, with Start Update remaining enabled per the warn-but-allow
   design.
+- **LED control**, live: tapping the Blue preset changed the physical LED color immediately
+  (confirmed visually); dragging the brightness slider up correctly increased the LED's intensity
+  on release.
+- **Heart Rate + backpressure**, live: tapping Subscribe showed a live BPM number and a smoothly
+  scrolling graph updating roughly once per second. Flipping "Fast mode" on switched the board to
+  ~20 notifications/sec - the graph kept redrawing smoothly at its own fixed rate with no visible
+  lag, freeze, or crash, confirming the bounded-buffer + fixed-rate-sampling backpressure design
+  above actually holds up under load rather than just in theory.
 
 ## Requirements
 
@@ -144,3 +210,6 @@ cp ../ble-ota/build/ble_ota.bin app/src/main/assets/firmware/ble_ota.bin
   addition if you need it, just not wired up here.
 - No automated tests yet. The use case boundaries are drawn so the ViewModel is testable against a
   fake `BleOtaRepository` without any Android dependencies, but no tests are checked in.
+- Heart rate data is simulated on the board (a random walk, not a real sensor) - the graph/UI side
+  is written the same way it would be for a real strap, but there's no actual physiological signal
+  behind it.

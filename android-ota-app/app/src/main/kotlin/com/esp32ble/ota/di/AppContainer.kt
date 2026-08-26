@@ -10,10 +10,14 @@ import com.esp32ble.ota.domain.usecase.DisconnectDeviceUseCase
 import com.esp32ble.ota.domain.usecase.ExtractFirmwareVersionUseCase
 import com.esp32ble.ota.domain.usecase.LoadFirmwareFromAssetsUseCase
 import com.esp32ble.ota.domain.usecase.LoadFirmwareFromUriUseCase
+import com.esp32ble.ota.domain.usecase.ObserveHeartRateUseCase
 import com.esp32ble.ota.domain.usecase.PerformOtaUpdateUseCase
 import com.esp32ble.ota.domain.usecase.ReadDeviceVersionUseCase
+import com.esp32ble.ota.domain.usecase.ReadLedConfigUseCase
 import com.esp32ble.ota.domain.usecase.RebootDeviceUseCase
 import com.esp32ble.ota.domain.usecase.ScanForEspDeviceUseCase
+import com.esp32ble.ota.domain.usecase.SetHeartRateFastModeUseCase
+import com.esp32ble.ota.domain.usecase.WriteLedConfigUseCase
 
 /**
  * Minimal hand-rolled DI container - no Hilt/Koin, to keep the build simple. Everything is wired
@@ -35,4 +39,8 @@ class AppContainer(context: Context) {
     val loadFirmwareFromUri by lazy { LoadFirmwareFromUriUseCase(firmwareSource) }
     val readDeviceVersion by lazy { ReadDeviceVersionUseCase(bleOtaRepository) }
     val extractFirmwareVersion by lazy { ExtractFirmwareVersionUseCase() }
+    val readLedConfig by lazy { ReadLedConfigUseCase(bleOtaRepository) }
+    val writeLedConfig by lazy { WriteLedConfigUseCase(bleOtaRepository) }
+    val observeHeartRate by lazy { ObserveHeartRateUseCase(bleOtaRepository) }
+    val setHeartRateFastMode by lazy { SetHeartRateFastModeUseCase(bleOtaRepository) }
 }

@@ -1,11 +1,22 @@
 /*
- * BLE OTA example.
+ * BLE OTA example - now with a modular GATT profile.
  *
- * Advertises a custom GATT service (see gatt_svr.c) that a BLE central can
- * use to push a new firmware image into whichever OTA partition (ota_0 or
- * ota_1) isn't currently running, then reboot into it. See this project's
- * README for the wire protocol and the precautions this example takes to
- * make sure a bad update can't leave the board unbootable.
+ * This file only brings up the NimBLE stack and wires together three
+ * independent services, each a self-contained component:
+ *
+ *   components/ota_service/        push a new firmware image over BLE and
+ *                                   install it into whichever OTA partition
+ *                                   isn't currently running (see that
+ *                                   component and the project README for the
+ *                                   wire protocol and the safety precautions)
+ *   components/led_service/         live, persisted control of the onboard
+ *                                   addressable LED (color/brightness/blink)
+ *   components/heart_rate_service/  standard Bluetooth Heart Rate service
+ *                                   with a simulated BPM value
+ *
+ * Also handles the boot-time OTA rollback confirmation - see self_check_ok()
+ * below - which is about *this running app* proving itself healthy, not
+ * about any particular GATT service, so it stays here.
  */
 
 #include <assert.h>
@@ -15,9 +26,6 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "led_strip.h"
 #include "nvs_flash.h"
 
 #include "nimble/nimble_port.h"
@@ -26,8 +34,11 @@
 #include "host/ble_att.h"
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
+#include "services/gatt/ble_svc_gatt.h"
 
-#include "gatt_svr.h"
+#include "heart_rate_service.h"
+#include "led_service.h"
+#include "ota_service.h"
 
 static const char *TAG = "ble_ota_main";
 static const char *device_name = "esp32-ble-ota";
@@ -108,7 +119,8 @@ ble_ota_gap_event(struct ble_gap_event *event, void *arg)
                  event->connect.status == 0 ? "established" : "failed",
                  event->connect.status);
         if (event->connect.status == 0) {
-            gatt_svr_ota_on_connect(event->connect.conn_handle);
+            ota_service_on_connect(event->connect.conn_handle);
+            heart_rate_service_on_connect(event->connect.conn_handle);
         } else {
             ble_ota_advertise();
         }
@@ -116,7 +128,8 @@ ble_ota_gap_event(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, "disconnect; reason=%d", event->disconnect.reason);
-        gatt_svr_ota_on_disconnect();
+        ota_service_on_disconnect();
+        heart_rate_service_on_disconnect();
         ble_ota_advertise();
         return 0;
 
@@ -127,8 +140,8 @@ ble_ota_gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_SUBSCRIBE:
         ESP_LOGI(TAG, "subscribe event; attr_handle=%d cur_notify=%d",
                  event->subscribe.attr_handle, event->subscribe.cur_notify);
-        gatt_svr_ota_on_subscribe(event->subscribe.attr_handle,
-                                  event->subscribe.cur_notify);
+        ota_service_on_subscribe(event->subscribe.attr_handle, event->subscribe.cur_notify);
+        heart_rate_service_on_subscribe(event->subscribe.attr_handle, event->subscribe.cur_notify);
         return 0;
 
     case BLE_GAP_EVENT_MTU:
@@ -169,80 +182,31 @@ static void ble_ota_host_task(void *param)
     nimble_port_freertos_deinit();
 }
 
-/* Onboard addressable LED (GPIO8 on the C6-DevKitC).
- * Purely a visual marker so it's obvious which build/config is running -
- * not part of the OTA logic itself. Mode is chosen via `idf.py menuconfig`
- * (Example Configuration -> Status LED mode); see main/Kconfig.projbuild.
- *
- * This runs from its own task rather than inline as the first thing in
- * app_main(): calling the RMT-based LED driver that early was unreliable in
- * testing (produced a stuck/incorrect color on the strip); deferring it to a
- * task that runs after the rest of system init gets going fixed it. */
-#define STATUS_LED_GPIO 8
-
-static void led_task(void *arg)
+/* Shared by every service below - just logs what got registered where. */
+static void
+gatt_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg)
 {
-    led_strip_handle_t strip;
-    led_strip_config_t strip_config = {
-        .strip_gpio_num = STATUS_LED_GPIO,
-        .max_leds = 1,
-    };
-    led_strip_rmt_config_t rmt_config = {
-        .resolution_hz = 10 * 1000 * 1000,
-        .flags.with_dma = false,
-    };
-    esp_err_t err = led_strip_new_rmt_device(&strip_config, &rmt_config, &strip);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "led_strip_new_rmt_device failed: %s", esp_err_to_name(err));
-        vTaskDelete(NULL);
-        return;
-    }
+    char buf[BLE_UUID_STR_LEN];
 
-#if CONFIG_LED_MODE_ROTATE
-    struct { const char *label; uint32_t r, g, b; } phases[] = {
-        { "red",   16, 0,  0  },
-        { "green", 0,  16, 0  },
-        { "blue",  0,  0,  16 },
-        { "off",   0,  0,  0  },
-    };
-    ESP_LOGI(TAG, "Status LED: rotating R/G/B/off every %d s", CONFIG_LED_ROTATE_DELAY_SECONDS);
-    while (1) {
-        for (int i = 0; i < 4; i++) {
-            led_strip_set_pixel(strip, 0, phases[i].r, phases[i].g, phases[i].b);
-            led_strip_refresh(strip);
-            ESP_LOGI(TAG, "Status LED: %s", phases[i].label);
-            vTaskDelay(pdMS_TO_TICKS(CONFIG_LED_ROTATE_DELAY_SECONDS * 1000));
-        }
-    }
-#else
-#if CONFIG_LED_MODE_ONLY_GREEN
-    err = led_strip_set_pixel(strip, 0, 0, 16, 0);
-    const char *color_name = "green";
-#else
-    err = led_strip_set_pixel(strip, 0, 16, 0, 0);
-    const char *color_name = "red";
-#endif
-    if (err == ESP_OK) {
-        err = led_strip_refresh(strip);
-    }
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "Status LED set to %s on GPIO%d", color_name, STATUS_LED_GPIO);
-    } else {
-        ESP_LOGE(TAG, "Failed to set status LED: %s", esp_err_to_name(err));
-    }
-    vTaskDelete(NULL);
-#endif
-}
+    switch (ctxt->op) {
+    case BLE_GATT_REGISTER_OP_SVC:
+        ESP_LOGD(TAG, "registered service %s with handle=%d",
+                 ble_uuid_to_str(ctxt->svc.svc_def->uuid, buf), ctxt->svc.handle);
+        break;
 
-static void start_status_led(void)
-{
-    xTaskCreate(led_task, "led_task", 3072, NULL, 5, NULL);
+    case BLE_GATT_REGISTER_OP_CHR:
+        ESP_LOGD(TAG, "registering characteristic %s with def_handle=%d val_handle=%d",
+                 ble_uuid_to_str(ctxt->chr.chr_def->uuid, buf),
+                 ctxt->chr.def_handle, ctxt->chr.val_handle);
+        break;
+
+    default:
+        break;
+    }
 }
 
 void app_main(void)
 {
-    start_status_led();
-
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -289,9 +253,18 @@ void app_main(void)
 
     ble_hs_cfg.sync_cb = ble_ota_on_sync;
     ble_hs_cfg.reset_cb = ble_ota_on_reset;
-    ble_hs_cfg.gatts_register_cb = gatt_svr_register_cb;
+    ble_hs_cfg.gatts_register_cb = gatt_register_cb;
 
-    int rc = gatt_svr_init();
+#if CONFIG_BT_NIMBLE_GAP_SERVICE
+    ble_svc_gap_init();
+#endif
+    ble_svc_gatt_init();
+
+    int rc = ota_service_init();
+    assert(rc == 0);
+    rc = led_service_init();
+    assert(rc == 0);
+    rc = heart_rate_service_init();
     assert(rc == 0);
 
     rc = ble_svc_gap_device_name_set(device_name);

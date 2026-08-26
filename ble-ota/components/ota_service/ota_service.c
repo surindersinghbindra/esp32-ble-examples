@@ -43,7 +43,7 @@
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 
-#include "gatt_svr.h"
+#include "ota_service.h"
 
 static const char *TAG = "ble_ota_gatt";
 
@@ -293,7 +293,7 @@ ota_version_access_cb(uint16_t conn_handle, uint16_t attr_handle,
     return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
-static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
+static const struct ble_gatt_svc_def ota_service_svcs[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid = &ota_svc_uuid.u,
@@ -326,44 +326,19 @@ static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
     },
 };
 
-void
-gatt_svr_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg)
-{
-    char buf[BLE_UUID_STR_LEN];
-
-    switch (ctxt->op) {
-    case BLE_GATT_REGISTER_OP_SVC:
-        MODLOG_DFLT(DEBUG, "registered service %s with handle=%d\n",
-                    ble_uuid_to_str(ctxt->svc.svc_def->uuid, buf),
-                    ctxt->svc.handle);
-        break;
-
-    case BLE_GATT_REGISTER_OP_CHR:
-        MODLOG_DFLT(DEBUG, "registering characteristic %s with "
-                    "def_handle=%d val_handle=%d\n",
-                    ble_uuid_to_str(ctxt->chr.chr_def->uuid, buf),
-                    ctxt->chr.def_handle,
-                    ctxt->chr.val_handle);
-        break;
-
-    default:
-        break;
-    }
-}
-
-void gatt_svr_ota_on_connect(uint16_t conn_handle)
+void ota_service_on_connect(uint16_t conn_handle)
 {
     s_conn_handle = conn_handle;
 }
 
-void gatt_svr_ota_on_disconnect(void)
+void ota_service_on_disconnect(void)
 {
     ota_abort_if_in_progress("BLE link dropped");
     s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
     s_control_notify_enabled = false;
 }
 
-void gatt_svr_ota_on_subscribe(uint16_t attr_handle, bool cur_notify)
+void ota_service_on_subscribe(uint16_t attr_handle, bool cur_notify)
 {
     if (attr_handle == s_ota_control_val_handle) {
         s_control_notify_enabled = cur_notify;
@@ -371,7 +346,7 @@ void gatt_svr_ota_on_subscribe(uint16_t attr_handle, bool cur_notify)
 }
 
 int
-gatt_svr_init(void)
+ota_service_init(void)
 {
     int rc;
 
@@ -384,17 +359,12 @@ gatt_svr_init(void)
         return -1;
     }
 
-#if CONFIG_BT_NIMBLE_GAP_SERVICE
-    ble_svc_gap_init();
-#endif
-    ble_svc_gatt_init();
-
-    rc = ble_gatts_count_cfg(gatt_svr_svcs);
+    rc = ble_gatts_count_cfg(ota_service_svcs);
     if (rc != 0) {
         return rc;
     }
 
-    rc = ble_gatts_add_svcs(gatt_svr_svcs);
+    rc = ble_gatts_add_svcs(ota_service_svcs);
     if (rc != 0) {
         return rc;
     }

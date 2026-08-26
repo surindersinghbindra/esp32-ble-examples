@@ -17,14 +17,20 @@ import android.content.Context
 import android.os.Build
 import com.esp32ble.ota.domain.model.BleDeviceInfo
 import com.esp32ble.ota.domain.model.BleOtaException
+import com.esp32ble.ota.domain.model.HeartRateSample
+import com.esp32ble.ota.domain.model.LedConfig
 import com.esp32ble.ota.domain.model.OtaTransferEvent
 import com.esp32ble.ota.domain.repository.BleOtaRepository
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
@@ -59,7 +65,22 @@ class BleOtaRepositoryImpl(private val context: Context) : BleOtaRepository {
     private var gatt: BluetoothGatt? = null
     private var controlChar: BluetoothGattCharacteristic? = null
     private var dataChar: BluetoothGattCharacteristic? = null
+    private var ledConfigChar: BluetoothGattCharacteristic? = null
+    private var hrMeasurementChar: BluetoothGattCharacteristic? = null
+    private var hrRateControlChar: BluetoothGattCharacteristic? = null
     private var negotiatedMtu: Int = 23
+
+    /**
+     * Backpressure: bounded buffer that drops the *oldest* sample if nothing is collecting
+     * [observeHeartRate] fast enough, instead of growing without bound or blocking the BLE
+     * callback thread. This is the actual mechanism - see ObserveHeartRateUseCase's doc and the
+     * app README for how the UI layer also throttles its own redraw rate on top of this.
+     */
+    private val heartRateEvents = MutableSharedFlow<HeartRateSample>(
+        replay = 0,
+        extraBufferCapacity = 64,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
 
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
@@ -123,8 +144,18 @@ class BleOtaRepositoryImpl(private val context: Context) : BleOtaRepository {
     }
 
     private fun handleNotification(uuid: java.util.UUID, value: ByteArray?) {
-        if (uuid == BleOtaProtocol.CONTROL_CHAR_UUID) {
-            value?.firstOrNull()?.let { statusNotifications.trySend(it) }
+        when (uuid) {
+            BleOtaProtocol.CONTROL_CHAR_UUID ->
+                value?.firstOrNull()?.let { statusNotifications.trySend(it) }
+            HeartRateProtocol.MEASUREMENT_CHAR_UUID -> {
+                // Byte 0 is the flags byte (see heart_rate_service.c); byte 1 is BPM for the
+                // simple uint8 format this firmware always uses.
+                val bytes = value ?: return
+                if (bytes.size >= 2) {
+                    val bpm = bytes[1].toInt() and 0xFF
+                    heartRateEvents.tryEmit(HeartRateSample(bpm, System.currentTimeMillis()))
+                }
+            }
         }
     }
 
@@ -163,6 +194,28 @@ class BleOtaRepositoryImpl(private val context: Context) : BleOtaRepository {
         run {
             descriptor.value = value
             writeDescriptor(descriptor)
+        }
+    }
+
+    /** Shared by any characteristic we need notifications from (OTA control, heart rate). */
+    private suspend fun enableNotifications(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+        g.setCharacteristicNotification(characteristic, true)
+        val cccd = characteristic.getDescriptor(BleOtaProtocol.CCCD_UUID)
+            ?: throw BleOtaException("Characteristic ${characteristic.uuid} has no CCCD descriptor")
+        if (!g.writeDescriptorCompat(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)) {
+            throw BleOtaException("Failed to enable notifications on ${characteristic.uuid}")
+        }
+        val ev = awaitEvent<GattEvent.DescriptorWritten>()
+        if (ev.status != BluetoothGatt.GATT_SUCCESS) {
+            throw BleOtaException("Enabling notifications on ${characteristic.uuid} failed (status=${ev.status})")
+        }
+    }
+
+    private suspend fun disableNotifications(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+        g.setCharacteristicNotification(characteristic, false)
+        val cccd = characteristic.getDescriptor(BleOtaProtocol.CCCD_UUID) ?: return
+        if (g.writeDescriptorCompat(cccd, BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE)) {
+            runCatching { awaitEvent<GattEvent.DescriptorWritten>(timeoutMs = 3_000) }
         }
     }
 
@@ -233,20 +286,21 @@ class BleOtaRepositoryImpl(private val context: Context) : BleOtaRepository {
             controlChar = ctrl
             dataChar = data
 
+            // LED and Heart Rate services are optional extras on top of core OTA - look them up
+            // but don't fail the connection if a device variant doesn't have them.
+            g.getService(LedServiceProtocol.SERVICE_UUID)
+                ?.getCharacteristic(LedServiceProtocol.CONFIG_CHAR_UUID)
+                ?.also { ledConfigChar = it }
+            g.getService(HeartRateProtocol.SERVICE_UUID)?.let { hrService ->
+                hrMeasurementChar = hrService.getCharacteristic(HeartRateProtocol.MEASUREMENT_CHAR_UUID)
+                hrRateControlChar = hrService.getCharacteristic(HeartRateProtocol.RATE_CONTROL_CHAR_UUID)
+            }
+
             g.requestMtu(BleOtaProtocol.PREFERRED_MTU)
             negotiatedMtu = runCatching { awaitEvent<GattEvent.MtuChanged>(timeoutMs = 5_000).mtu }
                 .getOrDefault(23)
 
-            g.setCharacteristicNotification(ctrl, true)
-            val cccd = ctrl.getDescriptor(BleOtaProtocol.CCCD_UUID)
-                ?: throw BleOtaException("Control characteristic has no CCCD descriptor")
-            if (!g.writeDescriptorCompat(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)) {
-                throw BleOtaException("Failed to enable OTA status notifications")
-            }
-            val descEvent = awaitEvent<GattEvent.DescriptorWritten>()
-            if (descEvent.status != BluetoothGatt.GATT_SUCCESS) {
-                throw BleOtaException("Enabling notifications failed (status=${descEvent.status})")
-            }
+            enableNotifications(g, ctrl)
 
             negotiatedMtu
         }
@@ -277,6 +331,68 @@ class BleOtaRepositoryImpl(private val context: Context) : BleOtaRepository {
         gatt = null
         controlChar = null
         dataChar = null
+        ledConfigChar = null
+        hrMeasurementChar = null
+        hrRateControlChar = null
+    }
+
+    override suspend fun readLedConfig(): Result<LedConfig> = opMutex.withLock {
+        runCatching {
+            val g = gatt ?: throw BleOtaException("Not connected")
+            val ch = ledConfigChar ?: throw BleOtaException("LED service not found on device")
+            if (!g.readCharacteristic(ch)) {
+                throw BleOtaException("Failed to initiate LED config read")
+            }
+            val ev = awaitEvent<GattEvent.CharacteristicRead>(timeoutMs = 5_000)
+            if (ev.status != BluetoothGatt.GATT_SUCCESS) {
+                throw BleOtaException("LED config read failed (status=${ev.status})")
+            }
+            LedConfig.fromWireBytes(ev.value) ?: throw BleOtaException("Malformed LED config from device")
+        }
+    }
+
+    override suspend fun writeLedConfig(config: LedConfig): Result<Unit> = opMutex.withLock {
+        runCatching {
+            val g = gatt ?: throw BleOtaException("Not connected")
+            val ch = ledConfigChar ?: throw BleOtaException("LED service not found on device")
+            if (!g.writeCharacteristicCompat(ch, config.toWireBytes(), BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)) {
+                throw BleOtaException("Failed to write LED config")
+            }
+            val ev = awaitEvent<GattEvent.CharacteristicWritten>()
+            if (ev.status != BluetoothGatt.GATT_SUCCESS) {
+                throw BleOtaException("LED config write rejected (status=${ev.status})")
+            }
+        }
+    }
+
+    override fun observeHeartRate(): Flow<HeartRateSample> = flow {
+        opMutex.withLock {
+            val g = gatt ?: throw BleOtaException("Not connected")
+            val ch = hrMeasurementChar ?: throw BleOtaException("Heart rate service not found on device")
+            enableNotifications(g, ch)
+        }
+        emitAll(heartRateEvents)
+    }.onCompletion {
+        val g = gatt
+        val ch = hrMeasurementChar
+        if (g != null && ch != null) {
+            runCatching { opMutex.withLock { disableNotifications(g, ch) } }
+        }
+    }
+
+    override suspend fun setHeartRateFastMode(fast: Boolean): Result<Unit> = opMutex.withLock {
+        runCatching {
+            val g = gatt ?: throw BleOtaException("Not connected")
+            val ch = hrRateControlChar ?: throw BleOtaException("Heart rate service not found on device")
+            val payload = byteArrayOf(if (fast) 1 else 0)
+            if (!g.writeCharacteristicCompat(ch, payload, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)) {
+                throw BleOtaException("Failed to write heart rate control")
+            }
+            val ev = awaitEvent<GattEvent.CharacteristicWritten>()
+            if (ev.status != BluetoothGatt.GATT_SUCCESS) {
+                throw BleOtaException("Heart rate control write rejected (status=${ev.status})")
+            }
+        }
     }
 
     override fun performOtaUpdate(firmware: ByteArray): Flow<OtaTransferEvent> = flow {
