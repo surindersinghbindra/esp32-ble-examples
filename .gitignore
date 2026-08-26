@@ -10,6 +10,15 @@ managed_components/
 
 # Editor / machine-specific settings
 .vscode/
+.idea/
+*.iml
+
+# Android / Gradle
+.gradle/
+.kotlin/
+local.properties
+*.hprof
+.cxx/
 
 # OS files
 .DS_Store

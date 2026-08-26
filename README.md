@@ -2,7 +2,8 @@
 
 A collection of ESP-IDF example projects for the ESP32-C6, each in its own self-contained
 subfolder. Every subfolder is an independent ESP-IDF project — `cd` into it and run `idf.py`
-commands from there.
+commands from there. One subfolder, [`android-ota-app/`](android-ota-app/), is a real Android app
+rather than an ESP-IDF project — see [Companion Android app](#companion-android-app) below.
 
 ## Examples
 
@@ -12,6 +13,14 @@ commands from there.
 | [`ble-ota/`](ble-ota/) | Pushes a new firmware image over BLE into a dual-partition (ota_0/ota_1) layout, with rollback protection if the new image never confirms itself healthy. |
 
 More examples will be added as new subfolders alongside these.
+
+## Companion Android app
+
+[`android-ota-app/`](android-ota-app/) is a Jetpack Compose app (MVVM + Clean Architecture) that
+drives the `ble-ota` example from a phone: scan, connect, pick a firmware file, watch a live
+progress bar, and reboot the board once it confirms success. Verified end-to-end on real hardware
+— see its own README for the architecture, protocol details, and what that test run found. It's a
+separate Gradle project, not built by `idf.py`.
 
 ## Prerequisites (shared across all examples)
 
