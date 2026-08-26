@@ -15,6 +15,9 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "led_strip.h"
 #include "nvs_flash.h"
 
 #include "nimble/nimble_port.h"
@@ -166,8 +169,52 @@ static void ble_ota_host_task(void *param)
     nimble_port_freertos_deinit();
 }
 
+/* Onboard addressable LED (GPIO8 on the C6-DevKitC), driven solid red.
+ * Purely a visual marker so an OTA update from a prior build (with no LED
+ * code at all) is obviously visible after it reboots - not part of the OTA
+ * logic itself.
+ *
+ * This runs from its own task rather than inline as the first thing in
+ * app_main(): calling the RMT-based LED driver that early was unreliable in
+ * testing (produced a stuck/incorrect color on the strip); deferring it to a
+ * task that runs after the rest of system init gets going fixed it. */
+#define STATUS_LED_GPIO 8
+
+static void led_init_task(void *arg)
+{
+    led_strip_handle_t strip;
+    led_strip_config_t strip_config = {
+        .strip_gpio_num = STATUS_LED_GPIO,
+        .max_leds = 1,
+    };
+    led_strip_rmt_config_t rmt_config = {
+        .resolution_hz = 10 * 1000 * 1000,
+        .flags.with_dma = false,
+    };
+    esp_err_t err = led_strip_new_rmt_device(&strip_config, &rmt_config, &strip);
+    if (err == ESP_OK) {
+        err = led_strip_set_pixel(strip, 0, 16, 0, 0);
+    }
+    if (err == ESP_OK) {
+        err = led_strip_refresh(strip);
+    }
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Status LED set to red on GPIO%d", STATUS_LED_GPIO);
+    } else {
+        ESP_LOGE(TAG, "Failed to set status LED: %s", esp_err_to_name(err));
+    }
+    vTaskDelete(NULL);
+}
+
+static void set_status_led_red(void)
+{
+    xTaskCreate(led_init_task, "led_init", 3072, NULL, 5, NULL);
+}
+
 void app_main(void)
 {
+    set_status_led_red();
+
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());

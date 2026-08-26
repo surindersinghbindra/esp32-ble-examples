@@ -14,6 +14,13 @@ inactive slot, the board validates it and switches its boot partition, the clien
 triggers a reboot, and the board confirms the new image is healthy before making the switch
 permanent.
 
+The firmware also drives the onboard addressable LED solid red - purely as a visible "yes, the new
+image is really running" marker, unrelated to the OTA logic itself. It's set from its own FreeRTOS
+task (`led_init_task` in `main.c`) rather than inline as the first line of `app_main()`: calling
+the RMT-based LED driver that early was unreliable in testing (the strip silently kept showing a
+stale color from a previous flash instead of the one just requested); deferring it to a task that
+runs once the rest of system init gets going fixed it.
+
 ## How it works
 
 ```
@@ -175,9 +182,11 @@ ble-ota/
 ├── CMakeLists.txt
 ├── sdkconfig.defaults           # BLE stack, ota_0/ota_1 partition table, rollback enable
 ├── sdkconfig.defaults.esp32c6
+├── dependencies.lock             # Locked component-manager dependency versions (commit this)
 ├── main/
 │   ├── CMakeLists.txt
-│   ├── main.c                   # BLE/NimBLE plumbing + boot-time rollback confirmation
+│   ├── idf_component.yml         # Declares the espressif/led_strip dependency (status LED)
+│   ├── main.c                    # BLE/NimBLE plumbing + boot-time rollback confirmation + status LED
 │   ├── gatt_svr.h
 │   └── gatt_svr.c                # OTA GATT service: control/data characteristics, esp_ota_* calls
 └── tools/
