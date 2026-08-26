@@ -18,6 +18,7 @@ from bleak import BleakScanner, BleakClient
 
 CONTROL_UUID = "f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1ba1"
 DATA_UUID = "f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1ba2"
+VERSION_UUID = "f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1ba3"
 
 CMD_START = bytes([0x01])
 CMD_END = bytes([0x02])
@@ -25,6 +26,21 @@ CMD_ABORT = bytes([0x03])
 CMD_REBOOT = bytes([0x04])
 
 STATUS_NAMES = {0x00: "IDLE", 0x01: "IN_PROGRESS", 0x02: "SUCCESS", 0x03: "ERROR"}
+
+# Offset of esp_app_desc_t.version within a built .bin: esp_image_header_t
+# (24 bytes) + the first segment's esp_image_segment_header_t (8 bytes), then
+# esp_app_desc_t.version is the first real field (after magic_word,
+# secure_version, and a reserved uint32[2]) at +16 into that struct.
+APP_DESC_OFFSET = 24 + 8
+VERSION_FIELD_OFFSET = APP_DESC_OFFSET + 16
+VERSION_FIELD_LEN = 32
+
+
+def read_bin_version(path: str) -> str:
+    with open(path, "rb") as f:
+        f.seek(VERSION_FIELD_OFFSET)
+        raw = f.read(VERSION_FIELD_LEN)
+    return raw.split(b"\x00", 1)[0].decode("utf-8", errors="replace")
 
 
 async def main():
@@ -38,6 +54,9 @@ async def main():
     with open(fw_path, "rb") as f:
         firmware = f.read()
     print(f"Loaded {len(firmware)} bytes from {fw_path}")
+
+    new_version = read_bin_version(fw_path)
+    print(f"New firmware version: {new_version!r}")
 
     print(f"Scanning for '{device_name}'...")
     dev = await BleakScanner.find_device_by_name(device_name, timeout=10.0)
@@ -61,6 +80,20 @@ async def main():
         # reliable - see the README for the tradeoff.
         chunk_size = max(20, client.mtu_size - 3)
         print(f"Connected. Negotiated MTU {client.mtu_size} -> chunk size {chunk_size} bytes")
+
+        # --- Firmware version check (precaution, not a hard gate) ---
+        # Warns if the device already reports the same version as the image
+        # we're about to push, but still lets the update proceed - useful
+        # when you're deliberately re-flashing the same version to test.
+        try:
+            device_version_bytes = await client.read_gatt_char(VERSION_UUID)
+            device_version = device_version_bytes.decode("utf-8", errors="replace")
+            print(f"Device is currently running version: {device_version!r}")
+            if device_version == new_version:
+                print("*** WARNING: device already reports this exact version. ***")
+                print("*** Proceeding anyway (re-flashing the same version). ***")
+        except Exception as e:
+            print(f"Could not read device version (older firmware without this characteristic?): {e}")
 
         await client.start_notify(CONTROL_UUID, on_status)
 

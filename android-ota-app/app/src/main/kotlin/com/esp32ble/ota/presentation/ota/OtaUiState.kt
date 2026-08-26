@@ -2,14 +2,19 @@ package com.esp32ble.ota.presentation.ota
 
 import com.esp32ble.ota.domain.model.BleDeviceInfo
 
-data class FirmwareInfo(val label: String, val sizeBytes: Int)
+data class FirmwareInfo(val label: String, val sizeBytes: Int, val version: String?)
 
 sealed interface OtaUiState {
     data object Idle : OtaUiState
     data object Scanning : OtaUiState
     data class DeviceFound(val device: BleDeviceInfo) : OtaUiState
     data class Connecting(val device: BleDeviceInfo) : OtaUiState
-    data class Connected(val device: BleDeviceInfo, val mtu: Int, val firmware: FirmwareInfo?) : OtaUiState
+    data class Connected(
+        val device: BleDeviceInfo,
+        val mtu: Int,
+        val firmware: FirmwareInfo?,
+        val deviceVersion: String?,
+    ) : OtaUiState
     data class Updating(
         val device: BleDeviceInfo,
         val bytesSent: Int,

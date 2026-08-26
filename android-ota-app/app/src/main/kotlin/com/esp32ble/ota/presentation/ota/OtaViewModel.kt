@@ -6,9 +6,11 @@ import com.esp32ble.ota.domain.model.BleDeviceInfo
 import com.esp32ble.ota.domain.model.OtaTransferEvent
 import com.esp32ble.ota.domain.usecase.ConnectToDeviceUseCase
 import com.esp32ble.ota.domain.usecase.DisconnectDeviceUseCase
+import com.esp32ble.ota.domain.usecase.ExtractFirmwareVersionUseCase
 import com.esp32ble.ota.domain.usecase.LoadFirmwareFromAssetsUseCase
 import com.esp32ble.ota.domain.usecase.LoadFirmwareFromUriUseCase
 import com.esp32ble.ota.domain.usecase.PerformOtaUpdateUseCase
+import com.esp32ble.ota.domain.usecase.ReadDeviceVersionUseCase
 import com.esp32ble.ota.domain.usecase.RebootDeviceUseCase
 import com.esp32ble.ota.domain.usecase.ScanForEspDeviceUseCase
 import kotlinx.coroutines.delay
@@ -28,6 +30,8 @@ class OtaViewModel(
     private val rebootDevice: RebootDeviceUseCase,
     private val loadFirmwareFromAssets: LoadFirmwareFromAssetsUseCase,
     private val loadFirmwareFromUri: LoadFirmwareFromUriUseCase,
+    private val readDeviceVersion: ReadDeviceVersionUseCase,
+    private val extractFirmwareVersion: ExtractFirmwareVersionUseCase,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow<OtaUiState>(OtaUiState.Idle)
@@ -56,7 +60,12 @@ class OtaViewModel(
             connectToDevice(device)
                 .onSuccess { mtu ->
                     currentDevice = device
-                    _uiState.value = OtaUiState.Connected(device, mtu, firmware = null)
+                    _uiState.value = OtaUiState.Connected(device, mtu, firmware = null, deviceVersion = null)
+                    // Best-effort: if this fails, the version fields just stay blank - not fatal.
+                    readDeviceVersion().onSuccess { version ->
+                        val connected = _uiState.value as? OtaUiState.Connected ?: return@onSuccess
+                        _uiState.value = connected.copy(deviceVersion = version)
+                    }
                 }
                 .onFailure { e ->
                     _uiState.value = OtaUiState.Error(e.message ?: "Failed to connect")
@@ -83,7 +92,8 @@ class OtaViewModel(
     private fun onFirmwareLoaded(label: String, bytes: ByteArray) {
         pendingFirmware = bytes
         val connected = _uiState.value as? OtaUiState.Connected ?: return
-        _uiState.value = connected.copy(firmware = FirmwareInfo(label, bytes.size))
+        val version = extractFirmwareVersion(bytes)
+        _uiState.value = connected.copy(firmware = FirmwareInfo(label, bytes.size, version))
     }
 
     fun startUpdate() {

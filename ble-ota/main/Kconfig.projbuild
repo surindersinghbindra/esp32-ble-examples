@@ -1,0 +1,31 @@
+menu "BLE OTA Example Configuration"
+
+    choice LED_MODE
+        prompt "Status LED mode"
+        default LED_MODE_ONLY_RED
+        help
+            Selects how the onboard addressable LED behaves. This has nothing
+            to do with the OTA logic itself - it's just a visible marker so
+            you can tell which build is currently running.
+
+        config LED_MODE_ONLY_RED
+            bool "Only Red (steady)"
+
+        config LED_MODE_ONLY_GREEN
+            bool "Only Green (steady)"
+
+        config LED_MODE_ROTATE
+            bool "Rotate through Red / Green / Blue / Off"
+    endchoice
+
+    config LED_ROTATE_DELAY_SECONDS
+        int "Seconds between LED rotation phases"
+        depends on LED_MODE_ROTATE
+        range 1 60
+        default 4
+        help
+            How long each phase (Red, Green, Blue, Off) stays lit before
+            moving to the next one, when Status LED mode is set to Rotate.
+            Only used in Rotate mode - the solid modes just stay lit.
+
+endmenu

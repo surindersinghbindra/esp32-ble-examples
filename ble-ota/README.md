@@ -51,12 +51,13 @@ BLE Central (phone / PC)                    ESP32-C6
 
 ## GATT protocol
 
-Custom service `f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1ba0` with two characteristics:
+Custom service `f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1ba0` with three characteristics:
 
 | Characteristic | UUID | Properties | Purpose |
 |---|---|---|---|
 | Control | `...ba1` | read, write, notify | Send commands, receive status |
 | Data | `...ba2` | write, write-without-response | Raw firmware bytes, in order |
+| Version | `...ba3` | read | Running firmware's version string (UTF-8, no null terminator) |
 
 **Control commands** (write a single byte):
 
@@ -116,12 +117,56 @@ Custom service `f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1ba0` with two characteristics:
   `bleprph` example under `nimble/` in ESP-IDF for `sm_bonding`/`sm_mitm`/`sm_sc` and
   `BLE_GATT_CHR_F_WRITE_ENC`) and/or verify a cryptographic signature on the image before calling
   `esp_ota_set_boot_partition()`.
-- **No version/rollback-protection check** beyond image validity - it will happily "update" to an
-  older or identical firmware if you ask it to.
+- **No rollback-protection against re-installing an older version.** The Version characteristic
+  and the version check in the clients (see below) only *warn* on a match - they don't inspect
+  version numbers to block a downgrade, and there is no anti-rollback eFuse configured
+  (`CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK`). It will happily install an older or identical firmware
+  if you ask it to.
 - **Throughput is slow (a few KB/s).** The reference client uses write-with-response for every
   chunk, which round-trips over BLE per write - reliable, but not fast. A ~640KB image takes a
   few minutes. A faster client could use write-without-response with real credit-based flow
   control, but that's more complex than this example needs.
+
+## LED configuration
+
+`idf.py menuconfig` -> **BLE OTA Example Configuration** -> **Status LED mode** (backed by
+`main/Kconfig.projbuild`):
+
+| Mode | Behavior |
+|---|---|
+| Only Red (default) | Steady red, always on |
+| Only Green | Steady green, always on |
+| Rotate | Cycles Red -> Green -> Blue -> Off, repeating, `n` seconds per phase |
+
+**Seconds between LED rotation phases** (`CONFIG_LED_ROTATE_DELAY_SECONDS`, default 4, range 1-60)
+only applies in Rotate mode - the solid modes just stay lit. This is purely cosmetic (which build
+is visibly running); it has nothing to do with the OTA transfer itself.
+
+To build a one-off variant without changing the checked-in default, edit the generated `sdkconfig`
+directly (this is exactly what `menuconfig` does under the hood) and rebuild:
+
+```bash
+idf.py menuconfig   # interactively, under BLE OTA Example Configuration
+# or, non-interactively:
+sed -i '' 's/^CONFIG_LED_MODE_ONLY_RED=y/# CONFIG_LED_MODE_ONLY_RED is not set/' sdkconfig
+sed -i '' 's/^# CONFIG_LED_MODE_ROTATE is not set/CONFIG_LED_MODE_ROTATE=y/' sdkconfig
+idf.py build
+```
+
+## Firmware version check
+
+Before pushing an update, both `tools/ota_client.py` and the Android app read the connected
+device's **Version** characteristic and compare it against the version embedded in the `.bin` file
+they're about to send (parsed directly from the image's `esp_app_desc_t` header - see
+`read_bin_version()` in the Python script, or `FirmwareVersionReader` in the Android app). If they
+match, both **warn but still allow the update to proceed** - useful when you're deliberately
+re-flashing the same version to test the OTA path itself, rather than a hard gate that would get in
+your way. If you want a real gate (e.g. reject exact re-installs, or reject downgrades by parsed
+semantic version), that's a straightforward extension of the same check.
+
+The version string itself is whatever `idf.py` embedded from `git describe` at build time (you've
+seen it in the logs throughout this README, e.g. `1ecc512-dirty`) - there's no separate manual
+version number to keep in sync.
 
 ## Hardware Required
 
@@ -135,6 +180,8 @@ Custom service `f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1ba0` with two characteristics:
 
 * ESP-IDF v6.1 (tested against `v6.1-beta1`)
 * Python 3 with [`bleak`](https://pypi.org/project/bleak/) installed, to run `tools/ota_client.py`
+  (see [Python OTA testing from a Mac](#python-ota-testing-from-a-mac) below for the exact
+  commands and what needs installing)
 
 ## Build and initial flash (over USB, same as any other example)
 
@@ -148,26 +195,82 @@ idf.py -p /dev/cu.usbserial-10 flash monitor
 The very first flash goes to `ota_0` (there's no factory partition). Watch the log - you should
 see the BLE stack come up and advertise as `esp32-ble-ota`.
 
-## Performing an OTA update over BLE
+## Python OTA testing from a Mac
 
-Make a change to `main/main.c` (or anything else) and rebuild:
+This is every command actually used to build, push, and observe an OTA update from a Mac over
+Bluetooth - no phone required.
+
+### One-time setup
+
+You need Python 3 (already on macOS, or `brew install python3`) and a virtual environment with
+[`bleak`](https://pypi.org/project/bleak/) (the cross-platform BLE library the script uses) and,
+optionally, [`pyserial`](https://pypi.org/project/pyserial/) if you also want to watch the boot log
+over USB at the same time as the BLE transfer:
 
 ```bash
+cd ble-ota
+python3 -m venv .venv
+source .venv/bin/activate
+pip install bleak pyserial
+```
+
+`bleak` is the only hard requirement for `tools/ota_client.py` itself; `pyserial` is only needed if
+you write your own little log-watching script like the one below - `idf.py monitor` (from an
+ESP-IDF shell) covers the same need without installing anything extra.
+
+### Build the image you want to push
+
+```bash
+source ~/.espressif/v6.1-beta1/esp-idf/export.sh   # if not already sourced in this shell
 idf.py build
 ```
 
-Then, from a machine with Bluetooth (no need for the USB cable at this point):
+### Push it over BLE
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install bleak
+source .venv/bin/activate   # if it's a new shell
 python tools/ota_client.py build/ble_ota.bin
 ```
 
-The script scans for `esp32-ble-ota`, streams `build/ble_ota.bin` into the inactive OTA slot,
-reports SUCCESS or ERROR, and - only on success - sends REBOOT. If you still have a serial monitor
-attached, you'll see it boot from the other partition and log the self-check/rollback-confirmation
-described above.
+This scans for `esp32-ble-ota`, reads its current version, warns if it matches the image you're
+about to send, streams `build/ble_ota.bin` into the inactive OTA slot with live progress, reports
+SUCCESS or ERROR, and - only on success - sends REBOOT.
+
+Optional second device-name argument, if you've renamed the firmware's advertised name:
+
+```bash
+python tools/ota_client.py build/ble_ota.bin my-custom-device-name
+```
+
+### Watching the boot log while an update runs (optional)
+
+The simplest option is `idf.py monitor` in a second terminal (needs the ESP-IDF environment
+sourced, same as any build):
+
+```bash
+idf.py -p /dev/cu.usbserial-10 monitor   # Ctrl-] to exit; replace the port with yours
+```
+
+If you'd rather not have a monitor process holding the serial port (it needs to be closed before
+`idf.py flash` can use the port), this is the small standalone `pyserial` script used to capture
+logs during development of this example - reads for a fixed duration and writes to a file, no
+device reset performed:
+
+```bash
+python3 -c "
+import serial, time
+s = serial.Serial('/dev/cu.usbserial-10', 115200, timeout=1)
+end = time.time() + 120  # seconds to capture
+while time.time() < end:
+    line = s.readline()
+    if line:
+        print(line.decode(errors='replace').rstrip())
+s.close()
+"
+```
+
+Replace `/dev/cu.usbserial-10` with your board's port (`ls /dev/cu.*` to find it) in every command
+above.
 
 ## Companion Android app
 
@@ -186,9 +289,10 @@ ble-ota/
 ├── main/
 │   ├── CMakeLists.txt
 │   ├── idf_component.yml         # Declares the espressif/led_strip dependency (status LED)
+│   ├── Kconfig.projbuild         # Status LED mode + rotation delay (idf.py menuconfig)
 │   ├── main.c                    # BLE/NimBLE plumbing + boot-time rollback confirmation + status LED
 │   ├── gatt_svr.h
-│   └── gatt_svr.c                # OTA GATT service: control/data characteristics, esp_ota_* calls
+│   └── gatt_svr.c                # OTA GATT service: control/data/version characteristics, esp_ota_* calls
 └── tools/
     └── ota_client.py             # Reference BLE OTA client (bleak-based)
 ```

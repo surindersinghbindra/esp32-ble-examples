@@ -46,6 +46,7 @@ class BleOtaRepositoryImpl(private val context: Context) : BleOtaRepository {
         data class MtuChanged(val mtu: Int, val status: Int) : GattEvent
         data class DescriptorWritten(val status: Int) : GattEvent
         data class CharacteristicWritten(val status: Int) : GattEvent
+        data class CharacteristicRead(val status: Int, val value: ByteArray) : GattEvent
     }
 
     private val bluetoothManager =
@@ -83,6 +84,26 @@ class BleOtaRepositoryImpl(private val context: Context) : BleOtaRepository {
             status: Int,
         ) {
             events.trySend(GattEvent.CharacteristicWritten(status))
+        }
+
+        @Suppress("DEPRECATION")
+        override fun onCharacteristicRead(
+            g: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int,
+        ) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                events.trySend(GattEvent.CharacteristicRead(status, characteristic.value ?: ByteArray(0)))
+            }
+        }
+
+        override fun onCharacteristicRead(
+            g: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray,
+            status: Int,
+        ) {
+            events.trySend(GattEvent.CharacteristicRead(status, value))
         }
 
         @Suppress("DEPRECATION")
@@ -228,6 +249,25 @@ class BleOtaRepositoryImpl(private val context: Context) : BleOtaRepository {
             }
 
             negotiatedMtu
+        }
+    }
+
+    override suspend fun readDeviceVersion(): Result<String> = opMutex.withLock {
+        runCatching {
+            val g = gatt ?: throw BleOtaException("Not connected")
+            val service = g.getService(BleOtaProtocol.SERVICE_UUID)
+                ?: throw BleOtaException("OTA service not found")
+            val versionChar = service.getCharacteristic(BleOtaProtocol.VERSION_CHAR_UUID)
+                ?: throw BleOtaException("Version characteristic not found")
+
+            if (!g.readCharacteristic(versionChar)) {
+                throw BleOtaException("Failed to initiate version read")
+            }
+            val ev = awaitEvent<GattEvent.CharacteristicRead>(timeoutMs = 5_000)
+            if (ev.status != BluetoothGatt.GATT_SUCCESS) {
+                throw BleOtaException("Version read failed (status=${ev.status})")
+            }
+            String(ev.value, Charsets.UTF_8)
         }
     }
 

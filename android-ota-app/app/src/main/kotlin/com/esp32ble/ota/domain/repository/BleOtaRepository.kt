@@ -17,6 +17,9 @@ interface BleOtaRepository {
     /** Connects, discovers services, and negotiates the ATT MTU. Returns the negotiated MTU. */
     suspend fun connect(device: BleDeviceInfo): Result<Int>
 
+    /** Reads the version string the connected device currently reports (see the Version characteristic). */
+    suspend fun readDeviceVersion(): Result<String>
+
     suspend fun disconnect()
 
     /**

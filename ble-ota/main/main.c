@@ -169,10 +169,10 @@ static void ble_ota_host_task(void *param)
     nimble_port_freertos_deinit();
 }
 
-/* Onboard addressable LED (GPIO8 on the C6-DevKitC), driven solid red.
- * Purely a visual marker so an OTA update from a prior build (with no LED
- * code at all) is obviously visible after it reboots - not part of the OTA
- * logic itself.
+/* Onboard addressable LED (GPIO8 on the C6-DevKitC).
+ * Purely a visual marker so it's obvious which build/config is running -
+ * not part of the OTA logic itself. Mode is chosen via `idf.py menuconfig`
+ * (Example Configuration -> Status LED mode); see main/Kconfig.projbuild.
  *
  * This runs from its own task rather than inline as the first thing in
  * app_main(): calling the RMT-based LED driver that early was unreliable in
@@ -180,7 +180,7 @@ static void ble_ota_host_task(void *param)
  * task that runs after the rest of system init gets going fixed it. */
 #define STATUS_LED_GPIO 8
 
-static void led_init_task(void *arg)
+static void led_task(void *arg)
 {
     led_strip_handle_t strip;
     led_strip_config_t strip_config = {
@@ -192,28 +192,56 @@ static void led_init_task(void *arg)
         .flags.with_dma = false,
     };
     esp_err_t err = led_strip_new_rmt_device(&strip_config, &rmt_config, &strip);
-    if (err == ESP_OK) {
-        err = led_strip_set_pixel(strip, 0, 16, 0, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "led_strip_new_rmt_device failed: %s", esp_err_to_name(err));
+        vTaskDelete(NULL);
+        return;
     }
+
+#if CONFIG_LED_MODE_ROTATE
+    struct { const char *label; uint32_t r, g, b; } phases[] = {
+        { "red",   16, 0,  0  },
+        { "green", 0,  16, 0  },
+        { "blue",  0,  0,  16 },
+        { "off",   0,  0,  0  },
+    };
+    ESP_LOGI(TAG, "Status LED: rotating R/G/B/off every %d s", CONFIG_LED_ROTATE_DELAY_SECONDS);
+    while (1) {
+        for (int i = 0; i < 4; i++) {
+            led_strip_set_pixel(strip, 0, phases[i].r, phases[i].g, phases[i].b);
+            led_strip_refresh(strip);
+            ESP_LOGI(TAG, "Status LED: %s", phases[i].label);
+            vTaskDelay(pdMS_TO_TICKS(CONFIG_LED_ROTATE_DELAY_SECONDS * 1000));
+        }
+    }
+#else
+#if CONFIG_LED_MODE_ONLY_GREEN
+    err = led_strip_set_pixel(strip, 0, 0, 16, 0);
+    const char *color_name = "green";
+#else
+    err = led_strip_set_pixel(strip, 0, 16, 0, 0);
+    const char *color_name = "red";
+#endif
     if (err == ESP_OK) {
         err = led_strip_refresh(strip);
     }
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "Status LED set to red on GPIO%d", STATUS_LED_GPIO);
+        ESP_LOGI(TAG, "Status LED set to %s on GPIO%d", color_name, STATUS_LED_GPIO);
     } else {
         ESP_LOGE(TAG, "Failed to set status LED: %s", esp_err_to_name(err));
     }
     vTaskDelete(NULL);
+#endif
 }
 
-static void set_status_led_red(void)
+static void start_status_led(void)
 {
-    xTaskCreate(led_init_task, "led_init", 3072, NULL, 5, NULL);
+    xTaskCreate(led_task, "led_task", 3072, NULL, 5, NULL);
 }
 
 void app_main(void)
 {
-    set_status_led_red();
+    start_status_led();
 
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {

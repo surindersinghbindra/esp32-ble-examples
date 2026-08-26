@@ -105,10 +105,15 @@ private fun ConnectedContent(
 ) {
     Text("Connected to ${state.device.name ?: state.device.address}")
     Text("Negotiated ATT MTU: ${state.mtu}")
+    Text("Running version: ${state.deviceVersion ?: "(reading...)"}")
     HorizontalDivider()
     Text("Firmware to install:")
     if (state.firmware != null) {
         Text("${state.firmware.label} - ${state.firmware.sizeBytes} bytes")
+        Text("Version: ${state.firmware.version ?: "(unknown)"}")
+        if (state.deviceVersion != null && state.firmware.version == state.deviceVersion) {
+            Text("WARNING: device already reports this exact version - proceeding will re-flash the same build.")
+        }
     } else {
         Text("(none selected yet)")
     }

@@ -16,6 +16,10 @@ class ConnectToDeviceUseCase(private val repository: BleOtaRepository) {
     suspend operator fun invoke(device: BleDeviceInfo): Result<Int> = repository.connect(device)
 }
 
+class ReadDeviceVersionUseCase(private val repository: BleOtaRepository) {
+    suspend operator fun invoke(): Result<String> = repository.readDeviceVersion()
+}
+
 class DisconnectDeviceUseCase(private val repository: BleOtaRepository) {
     suspend operator fun invoke() = repository.disconnect()
 }

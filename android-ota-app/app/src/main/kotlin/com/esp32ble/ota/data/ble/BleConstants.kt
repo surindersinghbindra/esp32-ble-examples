@@ -7,6 +7,7 @@ object BleOtaProtocol {
     val SERVICE_UUID: UUID = UUID.fromString("f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1ba0")
     val CONTROL_CHAR_UUID: UUID = UUID.fromString("f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1ba1")
     val DATA_CHAR_UUID: UUID = UUID.fromString("f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1ba2")
+    val VERSION_CHAR_UUID: UUID = UUID.fromString("f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1ba3")
     val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
     const val CMD_START: Byte = 0x01

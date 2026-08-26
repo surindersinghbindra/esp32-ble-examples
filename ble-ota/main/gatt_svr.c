@@ -18,6 +18,12 @@
  *   as many chunks as the negotiated ATT MTU allows. Only accepted while a
  *   START has been issued and no END/ABORT has followed it.
  *
+ *   Version (read) - the running app's version string (esp_app_desc_t's
+ *   `version` field, whatever `idf.py` embedded from `git describe`), as raw
+ *   UTF-8 bytes with no null terminator. A client can read this before
+ *   pushing an update to check whether it's about to install the same
+ *   version it already has - see README's "Firmware version check" section.
+ *
  * All the actual partition-safety logic (which of ota_0/ota_1 to target,
  * validating the image before switching the boot partition, aborting
  * cleanly on disconnect) lives here.
@@ -27,6 +33,7 @@
 #include <inttypes.h>
 #include <string.h>
 
+#include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_timer.h"
@@ -49,6 +56,9 @@ static const ble_uuid128_t ota_chr_control_uuid =
                       0x8c, 0x9d, 0xae, 0xbf, 0xc0, 0xd1, 0xe2, 0xf3);
 static const ble_uuid128_t ota_chr_data_uuid =
     BLE_UUID128_INIT(0xa2, 0x1b, 0x2c, 0x3d, 0x4e, 0x5f, 0x6a, 0x7b,
+                      0x8c, 0x9d, 0xae, 0xbf, 0xc0, 0xd1, 0xe2, 0xf3);
+static const ble_uuid128_t ota_chr_version_uuid =
+    BLE_UUID128_INIT(0xa3, 0x1b, 0x2c, 0x3d, 0x4e, 0x5f, 0x6a, 0x7b,
                       0x8c, 0x9d, 0xae, 0xbf, 0xc0, 0xd1, 0xe2, 0xf3);
 
 #define OTA_CMD_START  0x01
@@ -270,6 +280,19 @@ ota_data_access_cb(uint16_t conn_handle, uint16_t attr_handle,
     return 0;
 }
 
+static int
+ota_version_access_cb(uint16_t conn_handle, uint16_t attr_handle,
+                       struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    const esp_app_desc_t *desc = esp_app_get_description();
+    size_t len = strnlen(desc->version, sizeof(desc->version));
+    int rc = os_mbuf_append(ctxt->om, desc->version, len);
+    return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
+
 static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
@@ -289,6 +312,10 @@ static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
                  * since write-without-response has no built-in backpressure
                  * and can silently outrun the link, corrupting the transfer. */
                 .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
+            }, {
+                .uuid = &ota_chr_version_uuid.u,
+                .access_cb = ota_version_access_cb,
+                .flags = BLE_GATT_CHR_F_READ,
             }, {
                 0, /* No more characteristics in this service. */
             },

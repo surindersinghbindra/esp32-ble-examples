@@ -15,9 +15,11 @@ Each step is its own UI state, driven by a single `OtaViewModel`:
 2. **Scanning** - spinner
 3. **Device found** - shows name/address, "Connect" button
 4. **Connecting** - spinner
-5. **Connected** - shows negotiated MTU; pick firmware via **"Use bundled firmware"** (ships in
+5. **Connected** - shows negotiated MTU and the device's currently-running firmware version (read
+   from the Version characteristic); pick firmware via **"Use bundled firmware"** (ships in
    `app/src/main/assets/firmware/ble_ota.bin`) or **"Pick file..."** (system file picker, any
-   `.bin`); "Start Update" enables once firmware is loaded
+   `.bin`) - once loaded, its embedded version is shown too, with a warning (not a hard block) if
+   it matches what's already running; "Start Update" enables once firmware is loaded
 6. **Updating** - live progress bar + `bytesSent / totalBytes` + percentage, then a "Validating..."
    state while the device checks the image
 7. **Succeeded** - "Reboot Device" button (or "Disconnect without rebooting")
@@ -29,11 +31,12 @@ Each step is its own UI state, driven by a single `OtaViewModel`:
 
 ```
 domain/                          -- pure Kotlin, no Android imports
-├── model/        BleDeviceInfo, OtaTransferEvent, BleOtaException
+├── model/        BleDeviceInfo, OtaTransferEvent, BleOtaException, FirmwareVersionReader
 ├── repository/    BleOtaRepository, FirmwareSource   (interfaces only)
-└── usecase/       ScanForEspDeviceUseCase, ConnectToDeviceUseCase,
+└── usecase/       ScanForEspDeviceUseCase, ConnectToDeviceUseCase, ReadDeviceVersionUseCase,
                     PerformOtaUpdateUseCase, RebootDeviceUseCase,
-                    LoadFirmwareFromAssetsUseCase, LoadFirmwareFromUriUseCase, ...
+                    LoadFirmwareFromAssetsUseCase, LoadFirmwareFromUriUseCase,
+                    ExtractFirmwareVersionUseCase, ...
 
 data/ble/                        -- Android BLE implementation of the domain interfaces
 ├── BleConstants.kt               GATT UUIDs/commands - must match ble-ota/main/gatt_svr.c
@@ -63,12 +66,21 @@ small; add Hilt if the project grows.
 Implements the client side of the protocol documented in
 [`../ble-ota/README.md`](../ble-ota/README.md#gatt-protocol) - custom service
 `f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1ba0`, control characteristic for START/END/ABORT/REBOOT commands
-and status notifications, data characteristic for firmware bytes.
+and status notifications, data characteristic for firmware bytes, and a read-only version
+characteristic.
 
 One thing worth calling out: **the data chunk size is capped at 512 bytes** regardless of the
 negotiated ATT MTU (`BleOtaRepositoryImpl.kt`, `performOtaUpdate`), because the firmware's data
 characteristic buffer (`OTA_DATA_MAX_CHUNK` in `gatt_svr.c`) is a fixed 512-byte array. This was
 found by testing on real hardware, not by inspection - see below.
+
+**Firmware version check:** on connect, `ReadDeviceVersionUseCase` reads the device's Version
+characteristic; once a firmware image is loaded, `ExtractFirmwareVersionUseCase` /
+`FirmwareVersionReader` parses the same version string directly out of the image's
+`esp_app_desc_t` header (offset `24 + 8 + 16` into the `.bin` - see the constants in
+`FirmwareVersionReader`, which must stay in sync with `ble-ota/tools/ota_client.py`'s
+`read_bin_version()`). If both match, the Connected screen shows a warning but **Start Update stays
+enabled** - this is a warning, not a hard gate, matching the Python client's behavior.
 
 ## Verified on hardware
 
@@ -86,6 +98,11 @@ Redmi/Xiaomi Android 12 phone connected via `adb`:
   **Reboot Device** was tapped, and the device rebooted into `ota_0` (having previously been on
   `ota_1`), ran its self-check, and confirmed the new image (rollback cancelled) - full round trip
   end to end.
+- The version-check feature was also verified live: after connecting, the Connected screen
+  correctly showed the device's running version (read over BLE); loading the bundled firmware
+  (same version, since the asset had just been re-synced) correctly triggered the "device already
+  reports this exact version" warning, with Start Update remaining enabled per the warn-but-allow
+  design.
 
 ## Requirements
 
