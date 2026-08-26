@@ -33,6 +33,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * `@HiltViewModel` + `@Inject constructor` is the ViewModel equivalent of the `@Inject
@@ -108,7 +109,7 @@ class OtaViewModel @Inject constructor(
             // `withTimeoutOrNull` wraps that suspension with a deadline: past 15s it cancels the
             // coroutine and yields `null` instead of throwing, which is why `found` is nullable
             // even though `.first()` alone would either return a value or throw.
-            val found = withTimeoutOrNull(15_000) {
+            val found = withTimeoutOrNull(15_000.milliseconds) {
                 scanForEspDevice().first()
             }
             _uiState.value = if (found != null) {
@@ -203,7 +204,7 @@ class OtaViewModel @Inject constructor(
             stopHeartRate()
             _uiState.value = OtaUiState.Rebooting(device)
             rebootDevice() // The board disconnects on its own right after this; errors aren't actionable here.
-            delay(1_500)
+            delay(1_500.milliseconds)
             disconnectDevice()
             resetToIdle()
         }
@@ -269,7 +270,7 @@ class OtaViewModel @Inject constructor(
             // below) - checking it is what makes this loop a well-behaved *cooperative* cancellation
             // point instead of a `while (true)` that would keep sampling forever after unsubscribe.
             while (isActive) {
-                delay(200)
+                delay(200.milliseconds)
                 // `_currentBpm.value?.let { bpm -> ... }` only runs the block when the value isn't
                 // null (before the first BLE sample has ever arrived, it's still the initial null).
                 _currentBpm.value?.let { bpm ->

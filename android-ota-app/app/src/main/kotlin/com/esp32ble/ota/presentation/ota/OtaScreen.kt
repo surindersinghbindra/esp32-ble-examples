@@ -215,10 +215,10 @@ private fun LedControlSection(
 
     Text("Color presets:")
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedButton(onClick = { onSetColor(255, 0, 0) }) { Text("Red") }
-        OutlinedButton(onClick = { onSetColor(0, 255, 0) }) { Text("Green") }
-        OutlinedButton(onClick = { onSetColor(0, 0, 255) }) { Text("Blue") }
-        OutlinedButton(onClick = { onSetColor(255, 255, 0) }) { Text("Yellow") }
+        LedColorButton("Red", 255, 0, 0, config, onSetColor)
+        LedColorButton("Green", 0, 255, 0, config, onSetColor)
+        LedColorButton("Blue", 0, 0, 255, config, onSetColor)
+        LedColorButton("Yellow", 255, 255, 0, config, onSetColor)
     }
 
     Text("Mode:")
@@ -254,6 +254,30 @@ private fun LedControlSection(
             onValueChangeFinished = { onSetBlinkIntervalMs(blinkPos.toInt()) },
             valueRange = 100f..2000f,
         )
+    }
+}
+
+/**
+ * Highlights (filled vs outlined) whenever this preset's RGB triple matches the current config -
+ * same "compare against current state" idea as [LedModeButton] below, just on three fields instead
+ * of one enum. Note this stays highlighted even in Blink mode: the firmware blinks whatever color
+ * is currently set, so "which color" and "which mode" are independent bits of state, and both
+ * button rows show their own selection.
+ */
+@Composable
+private fun LedColorButton(
+    label: String,
+    red: Int,
+    green: Int,
+    blue: Int,
+    config: LedConfig,
+    onSetColor: (Int, Int, Int) -> Unit,
+) {
+    val selected = config.red == red && config.green == green && config.blue == blue
+    if (selected) {
+        Button(onClick = { onSetColor(red, green, blue) }) { Text(label) }
+    } else {
+        OutlinedButton(onClick = { onSetColor(red, green, blue) }) { Text(label) }
     }
 }
 
