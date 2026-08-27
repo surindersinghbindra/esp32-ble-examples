@@ -187,6 +187,22 @@ class BleOtaRepositoryImpl @Inject constructor(
     // that's specifically what `reified` needs to keep the real type available for the `is T`
     // check below. This is why callers can write the pleasant `awaitEvent<GattEvent.MtuChanged>()`
     // instead of passing a `Class<T>` token around by hand.
+    /**
+     * Drops any already-queued events before starting a *new* operation. Safe only because
+     * [opMutex] guarantees one GATT operation is in flight at a time: anything sitting in
+     * [events] when a new operation begins can only be a stale leftover from a *previous*
+     * operation that gave up waiting (see the encrypted-characteristic timeout note on
+     * [readLedConfig] / [writeLedConfig] below) - the real event for the operation we're about
+     * to start hasn't been triggered yet, since we haven't issued its GATT call. Without this,
+     * a late callback from an abandoned operation could be wrongly consumed by the next
+     * `awaitEvent<T>()` call of the same event type, handing back someone else's result.
+     */
+    private fun drainStaleEvents() {
+        while (events.tryReceive().isSuccess) {
+            /* discarded - see KDoc above */
+        }
+    }
+
     private suspend inline fun <reified T : GattEvent> awaitEvent(timeoutMs: Long = 15_000L): T =
         withTimeout(timeoutMs) {
             while (true) {
@@ -373,10 +389,20 @@ class BleOtaRepositoryImpl @Inject constructor(
         runCatching {
             val g = gatt ?: throw BleOtaException("Not connected")
             val ch = ledConfigChar ?: throw BleOtaException("LED service not found on device")
+            drainStaleEvents()
             if (!g.readCharacteristic(ch)) {
                 throw BleOtaException("Failed to initiate LED config read")
             }
-            val ev = awaitEvent<GattEvent.CharacteristicRead>(timeoutMs = 5_000)
+            /*
+             * This characteristic requires an encrypted link (see led_service.c /
+             * BLE_GATT_CHR_F_READ_ENC) - the *first* time it's touched after connecting, this
+             * read is what triggers Android's system pairing flow. That can easily take longer
+             * than a plain unencrypted read: the user has to notice and tap a system "Pair with
+             * esp32-ble-ota?" prompt, then LE Secure Connections' key exchange has to finish -
+             * so this gets a generous timeout instead of the few-hundred-ms an ordinary read
+             * would need, specifically to outlast a human, not just the radio.
+             */
+            val ev = awaitEvent<GattEvent.CharacteristicRead>(timeoutMs = 30_000)
             if (ev.status != BluetoothGatt.GATT_SUCCESS) {
                 throw BleOtaException("LED config read failed (status=${ev.status})")
             }
@@ -388,10 +414,13 @@ class BleOtaRepositoryImpl @Inject constructor(
         runCatching {
             val g = gatt ?: throw BleOtaException("Not connected")
             val ch = ledConfigChar ?: throw BleOtaException("LED service not found on device")
+            drainStaleEvents()
             if (!g.writeCharacteristicCompat(ch, config.toWireBytes(), BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)) {
                 throw BleOtaException("Failed to write LED config")
             }
-            val ev = awaitEvent<GattEvent.CharacteristicWritten>()
+            /* Same reasoning as readLedConfig()'s timeout above - this write can also be the
+             * one that triggers pairing, if the read above hasn't already. */
+            val ev = awaitEvent<GattEvent.CharacteristicWritten>(timeoutMs = 30_000)
             if (ev.status != BluetoothGatt.GATT_SUCCESS) {
                 throw BleOtaException("LED config write rejected (status=${ev.status})")
             }

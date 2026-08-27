@@ -102,8 +102,9 @@ Each `components/*_service/` is independent and exposes its own GATT service:
   example**: read/write require an encrypted link (`BLE_GATT_CHR_F_READ_ENC`/`WRITE_ENC`), and
   successful writes go out as an **Indication** (not Notify) - deliberately contrasted with Heart
   Rate's Notify. OTA and Heart Rate stay unauthenticated/unencrypted on purpose - see
-  `ble-ota/README.md`'s "Security: pairing and bonding" section, which as of this writing is
-  implemented and compiles but **not yet flashed/verified on real hardware**.
+  `ble-ota/README.md`'s "Security: pairing and bonding" section - **verified on hardware**:
+  pairing works, but a canceled/ignored prompt times out at the protocol level (~30s) and Android
+  then refuses to re-prompt until the device is "Forgotten" in the phone's Bluetooth settings.
 - `heart_rate_service` - **standard** Bluetooth SIG Heart Rate service (0x180D/0x2A37/0x2A38, not
   custom), plus one custom Rate Control characteristic to switch the simulated BPM's notify rate
   between ~1/s (realistic) and ~20/s (deliberately fast, for exercising client backpressure).

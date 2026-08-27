@@ -235,12 +235,28 @@ does this automatically. In the Bluetooth spec's terms, that characteristic is n
 level that still exercises real pairing, matched to this board having no display or keyboard for
 anything stronger (Passkey Entry, Numeric Comparison).
 
-**Status: implemented and compiles, not yet flashed/tested on hardware.** Unlike the rest of this
-README, this section describes code that hasn't been run on the board yet - expect the first
-LED-config read/write after this firmware is flashed to trigger a pairing request, which on Android
-may or may not surface a system prompt depending on the phone/OS version (see the L2CAP CoC section
-above for a reminder that this board's usual test phone, a Redmi/Xiaomi device, has shown
-OEM-specific BLE quirks before). Update this note once it's been verified.
+**Status: verified on hardware.** On this board's usual test phone (Redmi/Xiaomi, Android 12), the
+first LED-config touch after connecting does trigger a system "Pair with esp32-ble-ota?" prompt,
+and accepting it produces a real `encryption change event; status=0` in the serial log, followed by
+the read/write succeeding. Two things worth knowing before you try this yourself:
+
+- **A canceled or ignored prompt times out at the protocol level, not just in the app.** NimBLE's
+  Security Manager gives a pairing attempt about 30 seconds; if nothing answers the prompt in time,
+  the log shows `encryption change event; status=13` (`BLE_HS_ETIMEOUT`) and the phone disconnects.
+  That's correct behavior, not a bug - the app-side timeout for this operation was deliberately set
+  well above 30s (see the Android app's README) so it's the phone, not the app, that gives up first.
+- **After a canceled/timed-out prompt, Android won't offer to pair again on its own.** Several
+  reconnect attempts in a row connected and disconnected within a second or two, with no new pairing
+  attempt logged at all - Android's Bluetooth stack appears to cache the rejection per-device for
+  the session. The fix is on the phone, not the firmware or app: **Settings → Bluetooth → find the
+  device → Forget** (or toggle Bluetooth off/on), then reconnect. Once bonded successfully, normal
+  reconnects don't re-prompt, as expected.
+
+One more thing seen in the log around this same handshake, worth a mention in case it resurfaces:
+an HCI-level `BLE_ERR_INV_HCI_CMD_PARMS` on an `ogf=0x08, ocf=0x0027` command (LE Set Data Length)
+right as the connection's MTU/subscription settled. It didn't block anything - encryption still
+came up successfully right after - but if you see it and something *does* break, that's the command
+to go dig into first.
 
 **Not implemented**: a Filter Accept List (only allow already-bonded peers to connect at all,
 rather than just gating individual characteristics) would be the natural next step - NimBLE

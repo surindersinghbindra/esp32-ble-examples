@@ -130,6 +130,46 @@ The brightness and blink-interval sliders use Compose's `onValueChangeFinished` 
 a responsive feel, but only one write goes out when you let go, instead of one write per pixel of
 drag.
 
+### Pairing (this is the one encrypted characteristic)
+
+The LED Config characteristic is the project's one Security Mode 1 / Level 2 attribute - see
+[`../ble-ota/README.md`](../ble-ota/README.md#security-pairing-and-bonding) for the firmware side.
+Nothing in this app calls Android's pairing APIs directly; `readLedConfig()`/`writeLedConfig()` just
+do a plain `BluetoothGatt` read/write, and it's Android's own stack that reacts to the
+insufficient-encryption ATT error by throwing up the system "Pair with esp32-ble-ota?" prompt and
+retrying once you accept it.
+
+That has one real consequence for this app's code: **that first read/write has to wait out however
+long a human takes to notice and tap a system dialog**, not just however long a normal BLE
+round-trip takes. `readLedConfig()`/`writeLedConfig()` in `BleOtaRepositoryImpl.kt` use a 30-second
+timeout specifically for this reason - comfortably longer than NimBLE's own ~30s pairing-procedure
+timeout on the firmware side, so it's the phone that gives up first if a prompt goes unanswered, not
+this app. A shorter, "normal" GATT timeout here (the original code used 5s) fails this exact
+operation almost every time pairing is actually needed, leaving the LED Control section stuck on
+"(reading current LED state...)" with no error and no automatic retry - confirmed on real hardware
+before the timeout was widened.
+
+A second, related fix: `drainStaleEvents()` clears any already-queued GATT callback events before
+starting a new `readLedConfig()`/`writeLedConfig()` call. Without it, a *previous* attempt that
+timed out while pairing was still in progress could have its late callback arrive after the timeout
+already gave up on it - and the next unrelated GATT operation of the same event type could wrongly
+consume that stale result instead of its own. Safe to do here specifically because `opMutex`
+guarantees only one GATT operation is ever in flight at a time.
+
+If you cancel or ignore the pairing prompt, don't expect Android to offer it again on the next
+reconnect attempt in the same session - it doesn't. Go to the phone's **Settings → Bluetooth → find
+the device → Forget** (or toggle Bluetooth off/on) before retrying; see the firmware README's
+pairing section for what that looks like in the serial log on both a timed-out and a successful
+attempt.
+
+**Why you might also want nRF Connect (or another generic BLE inspector) for this one:** the app
+itself never subscribes to the LED Config characteristic's Indication - it only reads and writes
+the value, so you'll never see the "config confirmed via Indicate" behavior described in the
+firmware README from inside this app alone. To actually watch an Indication (and its
+peer-acknowledgment) happen, connect a tool like nRF Connect to `esp32-ble-ota` alongside this app,
+find the LED Config characteristic, enable indications on it, then change an LED setting from this
+app - the inspector should show a new 7-byte value arrive, acknowledged, on every write.
+
 ## GATT protocol: Heart Rate service + backpressure
 
 Subscribes to the standard Heart Rate Measurement characteristic (`0x2A37`) and writes the custom
@@ -203,6 +243,15 @@ Redmi/Xiaomi Android 12 phone connected via `adb`:
 - **LED control**, live: tapping the Blue preset changed the physical LED color immediately
   (confirmed visually); dragging the brightness slider up correctly increased the LED's intensity
   on release.
+- **Pairing**, live, including a real failure mode along the way: the first attempt was canceled on
+  the phone, which produced a genuine protocol-level `BLE_HS_ETIMEOUT` on the firmware side (not an
+  app bug), and several reconnect attempts afterward showed Android silently refusing to re-offer
+  the pairing prompt at all - resolved by "Forgetting" the device in the phone's Bluetooth settings.
+  The next attempt paired successfully (`encryption change event; status=0` in the firmware log),
+  and the LED Control section - previously stuck indefinitely on "(reading current LED
+  state...)" with the original 5-second read timeout - loaded correctly once that timeout was
+  widened to 30s. See "Pairing (this is the one encrypted characteristic)" above for the fixes this
+  led to.
 - **Heart Rate + backpressure**, live: tapping Subscribe showed a live BPM number and a smoothly
   scrolling graph updating roughly once per second. Flipping "Fast mode" on switched the board to
   ~20 notifications/sec - the graph kept redrawing smoothly at its own fixed rate with no visible
