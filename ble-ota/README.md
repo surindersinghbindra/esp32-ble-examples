@@ -294,6 +294,63 @@ to actually stress-test its backpressure handling against. See the companion And
 for how it handles that on the receiving end - a bounded drop-oldest buffer plus a UI redraw rate
 decoupled from the BLE notify rate.
 
+## GATT attribute reference: every service, characteristic, and CCCD
+
+A consolidated reference for the whole GATT server this firmware exposes - the per-service
+sections above explain *why* each one exists; this is the complete *what*, in one place.
+
+### Services and characteristics
+
+| Service | Characteristic | UUID | Properties | CCCD? | Security |
+|---|---|---|---|---|---|
+| OTA (`...1ba0`) | Control | `f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1ba1` | read, write, **notify** | Yes | None |
+| OTA (`...1ba0`) | Data | `f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1ba2` | write, write-without-response | No | None |
+| OTA (`...1ba0`) | Version | `f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1ba3` | read | No | None |
+| LED (`...1bb0`) | Config | `f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1bb1` | read-enc, write-enc, **indicate** | Yes | Encrypted link (Mode 1 / Level 2) |
+| Heart Rate (`0x180D`, standard) | Heart Rate Measurement | `0x2A37` (standard) | **notify** | Yes | None |
+| Heart Rate (`0x180D`, standard) | Body Sensor Location | `0x2A38` (standard) | read | No | None |
+| Heart Rate (`0x180D`, standard) | Rate Control | `f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1bc0` | write | No | None |
+
+All custom (non-standard-SIG) UUIDs share the base `f3e2d1c0-bfae-9d8c-7b6a-5f4e3d2c1bXX`, varying
+only the last byte - see each characteristic's UUID column above for the exact byte. The Android
+app's `BleConstants.kt` (`BleOtaProtocol`, `LedServiceProtocol`, `HeartRateProtocol`,
+`OtaL2capProtocol`) mirrors every one of these values by hand; there's no shared schema between
+firmware and app, just matching constants kept in sync manually on both ends.
+
+**Attribute handles are deliberately not listed here** - NimBLE assigns them at boot, in service
+registration order (`ota_service_init()`, then `led_service_init()`, then
+`heart_rate_service_init()` in `main.c`), and they can shift if that order or the set of
+characteristics ever changes. Treat them the way any real BLE client has to: discover them via the
+standard GATT service-discovery procedure (by UUID) rather than hardcoding a number. If you want to
+see the actual handles a given build assigned, `main.c`'s `gatt_register_cb()` logs each one
+(`ESP_LOGD`) at boot - bump the log level to Debug to see them.
+
+### CCCD (Client Characteristic Configuration Descriptor)
+
+Three characteristics above are marked "CCCD? Yes" because they have `NOTIFY` and/or `INDICATE` in
+their properties - the standard `0x2902` descriptor a client writes to actually turn that stream on
+or off. **None of this project's service definitions declare that descriptor themselves** - every
+`.flags` entry with `BLE_GATT_CHR_F_NOTIFY` and/or `BLE_GATT_CHR_F_INDICATE` above gets one added by
+NimBLE automatically, which is why you won't find a `.descriptors` array anywhere in
+`ota_service.c`, `led_service.c`, or `heart_rate_service.c`.
+
+The descriptor's value is 2 bytes, and only the bottom two bits mean anything:
+
+| Value written | Effect |
+|---|---|
+| `0x0000` | Turn off both - the default, unsubscribed state |
+| `0x0001` | Enable Notifications |
+| `0x0002` | Enable Indications |
+| `0x0003` | Enable both (only meaningful on a characteristic that sets both flags - none here do) |
+
+A client writing to this descriptor is what fires `BLE_GAP_EVENT_SUBSCRIBE` on the firmware side -
+`main.c`'s GAP event handler reads `event->subscribe.cur_notify` / `cur_indicate` off that event and
+forwards it to whichever service owns the characteristic (`ota_service_on_subscribe()`,
+`led_service_on_subscribe()`, `heart_rate_service_on_subscribe()`), which is how each service knows
+whether it's currently safe to call `ble_gatts_notify_custom()` / `ble_gatts_indicate()` at all -
+notifying or indicating a characteristic nobody has subscribed to is a silent no-op the BLE stack
+would otherwise just drop.
+
 ## Firmware version check
 
 Before pushing an update, both `tools/ota_client.py` and the Android app read the connected
