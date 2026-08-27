@@ -50,6 +50,17 @@ data class LedConfig(
     companion object {
         const val WIRE_LEN = 7
 
+        /**
+         * Must match `CONFIG_BLE_OTA_PAIRING_PASSKEY` in `ble-ota/main/Kconfig.projbuild`
+         * (default shown in `sdkconfig.defaults`). This app can't auto-submit a pairing PIN
+         * itself - `BluetoothDevice.setPin()`/`setPasskey()` need the system-only
+         * `BLUETOOTH_PRIVILEGED` permission, unavailable to a normal app - so this exists purely
+         * as a UI hint telling you what to type into the system pairing prompt, not something
+         * wired into the pairing flow. If you change the firmware's Kconfig value, update this
+         * to match or the hint shown in the app will be wrong.
+         */
+        const val PAIRING_PASSKEY_HINT = "123456"
+
         fun fromWireBytes(bytes: ByteArray): LedConfig? {
             if (bytes.size != WIRE_LEN) return null
             // `.toInt() and 0xFF` re-widens a signed Kotlin Byte back to its unsigned 0-255

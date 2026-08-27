@@ -215,10 +215,10 @@ OTA and Heart Rate services (see the warning above), but `main.c` now configures
 Manager project-wide:
 
 ```c
-ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_NO_IO;   /* no display/keyboard -> Just Works pairing */
-ble_hs_cfg.sm_bonding = 1;                    /* remember the pairing across reconnects */
-ble_hs_cfg.sm_mitm = 0;                       /* Just Works has no MITM protection - honest, not a bug */
-ble_hs_cfg.sm_sc = 1;                         /* LE Secure Connections, not legacy pairing */
+ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_DISP_ONLY;  /* claim a display we don't have - see below */
+ble_hs_cfg.sm_bonding = 1;                       /* remember the pairing across reconnects */
+ble_hs_cfg.sm_mitm = 1;                          /* require an authenticated method, not Just Works */
+ble_hs_cfg.sm_sc = 1;                            /* LE Secure Connections, not legacy pairing */
 ```
 
 plus `ble_store_config_init()` so bonds persist in NVS across reboots (`CONFIG_BT_NIMBLE_NVS_PERSIST=y`
@@ -230,27 +230,72 @@ None of this *forces* a connection to pair on its own - nothing here calls
 `ble_gap_security_initiate()`. Pairing actually kicks off the first time a central touches an
 encryption-requiring attribute (the LED Config characteristic above) and its BLE stack reacts to
 the resulting ATT error by starting the Security Manager procedure itself; Android's `BluetoothGatt`
-does this automatically. In the Bluetooth spec's terms, that characteristic is now Security Mode 1
-/ Level 2: unauthenticated pairing with encryption, no MITM protection - deliberately the simplest
-level that still exercises real pairing, matched to this board having no display or keyboard for
-anything stronger (Passkey Entry, Numeric Comparison).
+does this automatically.
 
-**Status: verified on hardware.** On this board's usual test phone (Redmi/Xiaomi, Android 12), the
-first LED-config touch after connecting does trigger a system "Pair with esp32-ble-ota?" prompt,
-and accepting it produces a real `encryption change event; status=0` in the serial log, followed by
-the read/write succeeding. Two things worth knowing before you try this yourself:
+### Pairing method: Passkey Entry with a fixed passkey (not Just Works)
+
+This board has no real display or keyboard, so it can't actually show a fresh random code the way
+Passkey Entry normally works. `ble_sm_configure_static_passkey()` is NimBLE's answer to that: it
+lets this device claim `BLE_SM_IO_CAP_DISP_ONLY` and always use one fixed, pre-configured passkey
+whenever its role in a pairing is to "display" one - `main.c` never gets asked for it
+(`BLE_GAP_EVENT_PASSKEY_ACTION` doesn't fire on this side), it's just silently supplied. Against a
+phone's usual Keyboard+Display capability, that resolves to Passkey Entry: our side "displays"
+(silently, the fixed value), the phone's system pairing dialog asks a human to type it in.
+
+The actual 6-digit value is `CONFIG_BLE_OTA_PAIRING_PASSKEY` in `main/Kconfig.projbuild` - change
+it with `idf.py menuconfig` (under "ble-ota Configuration") or by editing `sdkconfig.defaults`,
+default `123456`. `sm_mitm=1` means pairing *requires* this authenticated method - it won't
+silently fall back to Just Works.
+
+**Be clear-eyed about what this does and doesn't buy you, the same way this project is honest
+about Just Works elsewhere:** Passkey Entry exists to stop a man-in-the-middle *if* the passkey is
+a secret only the two legitimate devices know. This one is a fixed value checked into a public
+GitHub repo and baked into the companion app's bundled firmware - so it demonstrates the
+*mechanics* of authenticated pairing (and is observably different: a connection descriptor's
+`sec_state.authenticated` becomes `1`, versus `0` for Just Works), but doesn't provide real
+protection against anyone who's also read this same source. A deployment that actually needs that
+protection would need a passkey unique per physical unit, distributed out-of-band (e.g. printed on
+a label) - not one value shared by every device and published online.
+
+### What was verified on hardware, and what to know if you retest it
+
+The Just Works version of this (before the switch to Passkey Entry above) was fully verified on
+this board's usual test phone (Redmi/Xiaomi, Android 12): a real "Pair with esp32-ble-ota?" prompt,
+a real `encryption change event; status=0` on acceptance, and the LED read/write succeeding right
+after. Two findings from that testing still apply exactly the same way with Passkey Entry, since
+they're about the Security Manager procedure in general, not which pairing method is used:
 
 - **A canceled or ignored prompt times out at the protocol level, not just in the app.** NimBLE's
-  Security Manager gives a pairing attempt about 30 seconds; if nothing answers the prompt in time,
-  the log shows `encryption change event; status=13` (`BLE_HS_ETIMEOUT`) and the phone disconnects.
-  That's correct behavior, not a bug - the app-side timeout for this operation was deliberately set
-  well above 30s (see the Android app's README) so it's the phone, not the app, that gives up first.
-- **After a canceled/timed-out prompt, Android won't offer to pair again on its own.** Several
-  reconnect attempts in a row connected and disconnected within a second or two, with no new pairing
-  attempt logged at all - Android's Bluetooth stack appears to cache the rejection per-device for
-  the session. The fix is on the phone, not the firmware or app: **Settings → Bluetooth → find the
-  device → Forget** (or toggle Bluetooth off/on), then reconnect. Once bonded successfully, normal
-  reconnects don't re-prompt, as expected.
+  Security Manager gives a pairing attempt about 30 seconds; if nothing answers in time, the log
+  shows `encryption change event; status=13` (`BLE_HS_ETIMEOUT`) and the phone disconnects. That's
+  correct behavior, not a bug - the app-side timeout for this operation is deliberately set well
+  above 30s (see the Android app's README) so it's the phone, not the app, that gives up first.
+- **After a canceled/timed-out prompt, Android won't offer to pair again on its own.** Reconnect
+  attempts just connect and disconnect within a second or two, with no new pairing attempt logged
+  at all - Android's Bluetooth stack appears to cache the rejection per-device for the session. The
+  fix is on the phone: **Settings → Bluetooth → find the device → Forget** (or toggle Bluetooth off/
+  on), then reconnect.
+
+**One thing that's different and worth knowing if you're testing this on a phone that already
+bonded under the old Just Works setup:** the LED Config characteristic only requires an *encrypted*
+link (`BLE_GATT_CHR_F_READ_ENC`/`WRITE_ENC`), not specifically an *authenticated* one - so an
+already-bonded phone can keep re-encrypting with its existing (unauthenticated) key without ever
+being asked to pair again, and you won't see the new PIN prompt at all. To actually exercise
+Passkey Entry, **Forget the device on the phone first** so the next connection starts a fresh
+pairing under the new `sm_mitm=1` requirement.
+
+**Status: verified on hardware**, on the same Redmi/Xiaomi (MIUI, Android 12) phone as everything
+else in this section. One MIUI-specific wrinkle worth knowing: the passkey prompt first appears as
+a condensed **notification** ("Pairing request - Tap to pair with esp32-ble-ota", with `PAIR &
+CONNECT`/`CANCEL`) rather than going straight to a full-screen dialog - the actual 6-digit PIN entry
+field is a separate screen that opens from tapping that notification, not something visible from
+the notification itself. The firmware side logged `static passkey injected` (confirming
+`ble_sm_configure_static_passkey()` fired as expected) followed by `encryption change event;
+status=0` once `123456` was entered, and the LED Config read succeeded immediately after -
+`sec_state.authenticated` is now `1` for this bond, versus `0` under the old Just Works setup. Also
+confirmed the bond survives a real OTA update + reboot cycle: after pushing a new image and
+rebooting, the app reconnected and read LED Config back successfully with no new pairing prompt,
+exactly as `CONFIG_BT_NIMBLE_NVS_PERSIST` is supposed to guarantee.
 
 One more thing seen in the log around this same handshake, worth a mention in case it resurfaces:
 an HCI-level `BLE_ERR_INV_HCI_CMD_PARMS` on an `ogf=0x08, ocf=0x0027` command (LE Set Data Length)

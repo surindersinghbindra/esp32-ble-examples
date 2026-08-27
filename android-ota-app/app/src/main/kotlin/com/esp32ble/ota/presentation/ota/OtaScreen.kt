@@ -208,6 +208,15 @@ private fun LedControlSection(
 ) {
     HorizontalDivider()
     Text("LED Control", style = MaterialTheme.typography.titleMedium)
+    // This is the one characteristic that requires pairing (Passkey Entry, not Just Works - see
+    // ble-ota/README.md's security section). The app can't type this into the system pairing
+    // prompt for you - Android restricts that API to system apps - so it's shown here purely as
+    // a copy-able hint for whichever prompt appears the first time this section loads.
+    Text(
+        "If a pairing prompt appears, enter PIN: ${LedConfig.PAIRING_PASSKEY_HINT}",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
     if (config == null) {
         Text("(reading current LED state...)")
         return

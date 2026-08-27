@@ -102,9 +102,20 @@ Each `components/*_service/` is independent and exposes its own GATT service:
   example**: read/write require an encrypted link (`BLE_GATT_CHR_F_READ_ENC`/`WRITE_ENC`), and
   successful writes go out as an **Indication** (not Notify) - deliberately contrasted with Heart
   Rate's Notify. OTA and Heart Rate stay unauthenticated/unencrypted on purpose - see
-  `ble-ota/README.md`'s "Security: pairing and bonding" section - **verified on hardware**:
-  pairing works, but a canceled/ignored prompt times out at the protocol level (~30s) and Android
-  then refuses to re-prompt until the device is "Forgotten" in the phone's Bluetooth settings.
+  `ble-ota/README.md`'s "Security: pairing and bonding" section. Pairing method is **Passkey
+  Entry with a fixed static passkey** (`CONFIG_BLE_OTA_PAIRING_PASSKEY` in
+  `main/Kconfig.projbuild`, default `123456`, changeable via `idf.py menuconfig`) - not Just
+  Works - via `ble_sm_configure_static_passkey()`; honestly, a passkey checked into a public repo
+  doesn't provide real MITM protection, this demonstrates the mechanism, not real security. The
+  Just-Works predecessor of this was **verified on hardware**: pairing works, a canceled/ignored
+  prompt times out at the protocol level (~30s), and Android refuses to re-prompt until the
+  device is "Forgotten" in the phone's Bluetooth settings - an already-bonded phone will also
+  silently skip the new passkey prompt entirely (the characteristic only requires *encryption*,
+  not *authentication*, so an old bond still satisfies it) unless you Forget the device first.
+  The Passkey Entry switch itself is **verified on hardware** too: a real PIN-entry prompt (on
+  MIUI, a two-step flow - a condensed notification, then a separate PIN screen), successful
+  encryption after entering `123456`, and the bond confirmed to survive a real OTA update +
+  reboot cycle with no re-pairing needed.
 - `heart_rate_service` - **standard** Bluetooth SIG Heart Rate service (0x180D/0x2A37/0x2A38, not
   custom), plus one custom Rate Control characteristic to switch the simulated BPM's notify rate
   between ~1/s (realistic) and ~20/s (deliberately fast, for exercising client backpressure).

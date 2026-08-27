@@ -341,30 +341,56 @@ void app_main(void)
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
 
     /*
-     * --- Security: pairing + bonding (Just Works, LE Secure Connections) ---
+     * --- Security: pairing + bonding (Passkey Entry, static passkey, LE Secure Connections) ---
      *
-     * This board has no display or keyboard, so BLE_SM_IO_CAP_NO_IO (Just
-     * Works) is the only pairing method that makes sense here - it gets
-     * encryption on the link but, unlike Passkey Entry or Numeric
-     * Comparison, no protection against a man-in-the-middle (sm_mitm stays
-     * 0). sm_sc=1 opts into LE Secure Connections (the post-4.2 ECDH-based
-     * pairing) rather than falling back to legacy pairing.
+     * This board still has no real display or keyboard - but ble_sm_configure_static_passkey()
+     * below lets it claim BLE_SM_IO_CAP_DISP_ONLY anyway. NimBLE never asks this app to actually
+     * show anything (no BLE_GAP_EVENT_PASSKEY_ACTION fires on our side): it just silently uses
+     * the configured fixed value whenever our side is asked to "display" one, which is what
+     * happens once capability negotiation with a phone's usual Keyboard+Display resolves to
+     * Passkey Entry - us "displaying", the phone's system pairing dialog asking a human to type
+     * the code in. sm_mitm=1 requires this authenticated method rather than allowing a silent
+     * fallback to Just Works.
      *
-     * Enabling this here doesn't force every connection to pair - nothing
-     * on this device ever calls ble_gap_security_initiate() itself. Pairing
-     * actually happens the first time a central touches an
-     * encryption-requiring attribute (see led_service.c's Config
-     * characteristic) and its stack reacts to the resulting ATT error by
-     * starting the Security Manager procedure - the OTA and Heart Rate
-     * characteristics are deliberately left as they were (no security
-     * requirement), so this doesn't change their existing, tested behavior.
+     * Important, and worth being just as honest about as this project already is for Just
+     * Works' sm_mitm=0: authenticated pairing only actually protects against a man-in-the-middle
+     * if the passkey is a secret only the legitimate two parties know.
+     * CONFIG_BLE_OTA_PAIRING_PASSKEY (see main/Kconfig.projbuild) defaults to a fixed value that
+     * is checked into this public repo and shipped inside the companion app's bundled firmware -
+     * so this demonstrates the *mechanics* of Passkey Entry pairing (a genuinely different flow
+     * from Just Works, and observably different: a connection descriptor's
+     * sec_state.authenticated becomes 1), but does NOT provide real protection against an
+     * attacker who has also read this same source. A deployment that actually needs this
+     * protection would need a passkey that's unique per device and distributed out-of-band (a
+     * label on the physical unit, for example), not one fixed value shared by every unit and
+     * published online.
+     *
+     * Enabling this here doesn't force every connection to pair - nothing on this device ever
+     * calls ble_gap_security_initiate() itself. Pairing actually happens the first time a
+     * central touches an encryption-requiring attribute (see led_service.c's Config
+     * characteristic) and its stack reacts to the resulting ATT error by starting the Security
+     * Manager procedure - the OTA and Heart Rate characteristics are deliberately left as they
+     * were (no security requirement), so this doesn't change their existing, tested behavior.
      */
-    ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_NO_IO;
+    ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_DISP_ONLY;
     ble_hs_cfg.sm_bonding = 1;
-    ble_hs_cfg.sm_mitm = 0;
+    ble_hs_cfg.sm_mitm = 1;
     ble_hs_cfg.sm_sc = 1;
     ble_hs_cfg.sm_our_key_dist |= BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist |= BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+
+#if MYNEWT_VAL(STATIC_PASSKEY)
+    int passkey_rc = ble_sm_configure_static_passkey(CONFIG_BLE_OTA_PAIRING_PASSKEY, true);
+    if (passkey_rc != 0) {
+        ESP_LOGW(TAG, "Failed to configure static passkey: rc=%d", passkey_rc);
+    } else {
+        ESP_LOGI(TAG, "Static pairing passkey configured: %06" PRIu32,
+                 (uint32_t)CONFIG_BLE_OTA_PAIRING_PASSKEY);
+    }
+#else
+    ESP_LOGW(TAG, "CONFIG_BT_NIMBLE_STATIC_PASSKEY=n - static passkey not compiled in; "
+                  "pairing will fall back to whatever capability negotiation resolves to");
+#endif
 
 #if CONFIG_BT_NIMBLE_GAP_SERVICE
     ble_svc_gap_init();

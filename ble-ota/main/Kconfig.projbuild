@@ -1,0 +1,19 @@
+menu "ble-ota Configuration"
+
+    config BLE_OTA_PAIRING_PASSKEY
+        int "BLE pairing passkey (6 digits)"
+        default 123456
+        range 0 999999
+        depends on BT_NIMBLE_STATIC_PASSKEY
+        help
+            Fixed passkey used for Passkey Entry pairing (see main.c's Security Manager setup
+            and led_service.c's Config characteristic). Whoever pairs with this device will need
+            to type this exact 6-digit number into their phone's system pairing prompt.
+
+            Educational note: this value is checked into source control and shipped in the
+            companion Android app's bundled firmware, so it does not function as a real secret -
+            it demonstrates the mechanics of Passkey Entry pairing (as opposed to Just Works),
+            not real protection against a man-in-the-middle. A deployment that actually needs
+            that protection would need a passkey unique per device, distributed out-of-band.
+
+endmenu

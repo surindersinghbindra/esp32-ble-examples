@@ -29,12 +29,14 @@
  * Security Manager exercised for the first time - see main.c's
  * ble_hs_cfg.sm_* setup for the pairing/bonding config this relies on.
  *
- * This is Security Mode 1, Level 2 in the Bluetooth spec's terms:
- * unauthenticated pairing (Just Works, since this board has no display or
- * keyboard to do better) with encryption, but no protection against a
- * man-in-the-middle. Deliberately left off the OTA characteristics, whose
- * existing unauthenticated behavior is documented and tested elsewhere -
- * this one characteristic is the contained example.
+ * This is Security Mode 1, Level 2 in the Bluetooth spec's terms: authenticated pairing
+ * (Passkey Entry, using a fixed passkey - see main.c's ble_sm_configure_static_passkey() call
+ * and main/Kconfig.projbuild's BLE_OTA_PAIRING_PASSKEY) with encryption. Nominally, Passkey
+ * Entry protects against a man-in-the-middle in a way Just Works can't - but only if the
+ * passkey is actually secret, and this one is checked into a public repo, so treat that
+ * protection as demonstrated, not real, here. Deliberately left off the OTA characteristics,
+ * whose existing unauthenticated behavior is documented and tested elsewhere - this one
+ * characteristic is the contained example.
  *
  * The characteristic also adds BLE_GATT_CHR_F_INDICATE (not Notify): once a
  * client subscribes, every successful write triggers an Indication of the

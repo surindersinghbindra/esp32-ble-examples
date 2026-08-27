@@ -15,6 +15,11 @@ CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=517
 # until disconnect - the device would ask to pair again on every reconnect.
 CONFIG_BT_NIMBLE_NVS_PERSIST=y
 
+# Lets main.c call ble_sm_configure_static_passkey() so this device can use
+# Passkey Entry pairing (see main/Kconfig.projbuild's BLE_OTA_PAIRING_PASSKEY
+# for the actual 6-digit value, changeable via `idf.py menuconfig`).
+CONFIG_BT_NIMBLE_STATIC_PASSKEY=y
+
 # Educational fast-update path: lets ota_service open an L2CAP CoC channel
 # (see the big comment in ota_service.c) as an alternative to the GATT Data
 # characteristic for bulk firmware bytes.

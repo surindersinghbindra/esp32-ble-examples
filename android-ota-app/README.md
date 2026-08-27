@@ -136,8 +136,18 @@ The LED Config characteristic is the project's one Security Mode 1 / Level 2 att
 [`../ble-ota/README.md`](../ble-ota/README.md#security-pairing-and-bonding) for the firmware side.
 Nothing in this app calls Android's pairing APIs directly; `readLedConfig()`/`writeLedConfig()` just
 do a plain `BluetoothGatt` read/write, and it's Android's own stack that reacts to the
-insufficient-encryption ATT error by throwing up the system "Pair with esp32-ble-ota?" prompt and
-retrying once you accept it.
+insufficient-encryption ATT error by throwing up the system pairing prompt and retrying once you
+accept it.
+
+The firmware requires **Passkey Entry** (not Just Works) with a fixed passkey - the system prompt
+will ask you to type a 6-digit PIN rather than just tap "Pair". This app cannot supply that PIN for
+you: `BluetoothDevice.setPin()`/`setPasskey()` require the system-only `BLUETOOTH_PRIVILEGED`
+permission, which a normal 3rd-party app can't hold. The most this app can do is show you what to
+type - `LedControlSection` in `OtaScreen.kt` displays a small hint, "If a pairing prompt appears,
+enter PIN: `LedConfig.PAIRING_PASSKEY_HINT`", sourced from a plain domain-layer constant that has
+to be kept in sync by hand with the firmware's `CONFIG_BLE_OTA_PAIRING_PASSKEY` (see the firmware
+README for why a fixed, publicly-checked-in passkey doesn't provide real man-in-the-middle
+protection, even though the pairing dialog itself is functionally identical to a real one).
 
 That has one real consequence for this app's code: **that first read/write has to wait out however
 long a human takes to notice and tap a system dialog**, not just however long a normal BLE
@@ -161,6 +171,11 @@ reconnect attempt in the same session - it doesn't. Go to the phone's **Settings
 the device → Forget** (or toggle Bluetooth off/on) before retrying; see the firmware README's
 pairing section for what that looks like in the serial log on both a timed-out and a successful
 attempt.
+
+**If your phone already bonded to this device before the firmware switched to Passkey Entry**, a
+reconnect may silently succeed with no PIN prompt at all - the LED Config characteristic only
+requires an *encrypted* link, not specifically an *authenticated* one, so an old bond's existing key
+still satisfies it. Forget the device first if you actually want to see the new PIN prompt.
 
 **Why you might also want nRF Connect (or another generic BLE inspector) for this one:** the app
 itself never subscribes to the LED Config characteristic's Indication - it only reads and writes
@@ -243,14 +258,20 @@ Redmi/Xiaomi Android 12 phone connected via `adb`:
 - **LED control**, live: tapping the Blue preset changed the physical LED color immediately
   (confirmed visually); dragging the brightness slider up correctly increased the LED's intensity
   on release.
-- **Pairing**, live, including a real failure mode along the way: the first attempt was canceled on
-  the phone, which produced a genuine protocol-level `BLE_HS_ETIMEOUT` on the firmware side (not an
-  app bug), and several reconnect attempts afterward showed Android silently refusing to re-offer
-  the pairing prompt at all - resolved by "Forgetting" the device in the phone's Bluetooth settings.
-  The next attempt paired successfully (`encryption change event; status=0` in the firmware log),
-  and the LED Control section - previously stuck indefinitely on "(reading current LED
-  state...)" with the original 5-second read timeout - loaded correctly once that timeout was
-  widened to 30s. See "Pairing (this is the one encrypted characteristic)" above for the fixes this
+- **Pairing**, live, under both pairing methods the firmware has used: first Just Works, including
+  a real failure mode along the way - the first attempt was canceled on the phone, which produced a
+  genuine protocol-level `BLE_HS_ETIMEOUT` on the firmware side (not an app bug), and several
+  reconnect attempts afterward showed Android silently refusing to re-offer the pairing prompt at
+  all, resolved by "Forgetting" the device in the phone's Bluetooth settings. The next attempt
+  paired successfully (`encryption change event; status=0` in the firmware log), and the LED
+  Control section - previously stuck indefinitely on "(reading current LED state...)" with the
+  original 5-second read timeout - loaded correctly once that timeout was widened to 30s. Then,
+  after the firmware switched to **Passkey Entry** with a fixed passkey: Forgetting the device
+  again and reconnecting produced a real PIN-entry prompt (a MIUI-specific two-step flow - a
+  condensed pairing notification first, then a separate PIN entry screen), entering `123456`
+  succeeded, and the bond was confirmed to survive a real OTA update + reboot cycle with no new
+  pairing prompt on reconnect. See
+  "Pairing (this is the one encrypted characteristic)" above for the fixes this
   led to.
 - **Heart Rate + backpressure**, live: tapping Subscribe showed a live BPM number and a smoothly
   scrolling graph updating roughly once per second. Flipping "Fast mode" on switched the board to
